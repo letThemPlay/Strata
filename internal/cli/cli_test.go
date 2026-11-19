@@ -2,21 +2,106 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
 	"strings"
 	"testing"
 
 	"github.com/letthemplay/Strata/internal/version"
 )
 
-var testCmd = Command{Name: "strata-test", Summary: "test binary"}
+var testCmd = Command{
+	Name:    "strata-test",
+	Summary: "test binary",
+	Subcommands: []Subcommand{
+		{
+			Name:    "echo",
+			Usage:   "[words...]",
+			Summary: "Echo arguments",
+			Run: func(_ context.Context, args []string, stdout, _ io.Writer) int {
+				_, _ = fmt.Fprintln(stdout, strings.Join(args, " "))
+				return ExitOK
+			},
+		},
+		{
+			Name:    "fail",
+			Summary: "Always fail",
+			Run: func(_ context.Context, _ []string, _, stderr io.Writer) int {
+				_, _ = fmt.Fprintln(stderr, "failed")
+				return ExitError
+			},
+		},
+		{
+			Name:    "ctx",
+			Summary: "Report context value",
+			Run: func(ctx context.Context, _ []string, stdout, _ io.Writer) int {
+				_, _ = fmt.Fprintln(stdout, ctx.Value(ctxKey{}))
+				return ExitOK
+			},
+		},
+	},
+}
+
+type ctxKey struct{}
 
 func run(t *testing.T, args ...string) (code int, stdout, stderr string) {
 	t.Helper()
 	var out, errOut bytes.Buffer
-	code = testCmd.Run(args, &out, &errOut)
+	code = testCmd.Run(context.Background(), args, &out, &errOut)
 	return code, out.String(), errOut.String()
+}
+
+func TestSubcommands(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantStdout string
+		wantStderr string
+	}{
+		{"dispatch with args", []string{"echo", "a", "b"}, ExitOK, "a b\n", ""},
+		{"dispatch without args", []string{"echo"}, ExitOK, "\n", ""},
+		{"subcommand exit code propagates", []string{"fail"}, ExitError, "", "failed\n"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			code, stdout, stderr := run(t, tc.args...)
+			if code != tc.wantCode || stdout != tc.wantStdout || stderr != tc.wantStderr {
+				t.Errorf("got (%d, %q, %q), want (%d, %q, %q)",
+					code, stdout, stderr, tc.wantCode, tc.wantStdout, tc.wantStderr)
+			}
+		})
+	}
+}
+
+func TestSubcommandReceivesContext(t *testing.T) {
+	t.Parallel()
+
+	ctx := context.WithValue(context.Background(), ctxKey{}, "marker")
+	var out bytes.Buffer
+	if code := testCmd.Run(ctx, []string{"ctx"}, &out, io.Discard); code != ExitOK {
+		t.Fatalf("exit code = %d", code)
+	}
+	if out.String() != "marker\n" {
+		t.Errorf("stdout = %q, want %q", out.String(), "marker\n")
+	}
+}
+
+func TestUsageListsSubcommands(t *testing.T) {
+	t.Parallel()
+
+	_, stdout, _ := run(t, "help")
+	for _, want := range []string{"echo [words...]", "Echo arguments", "fail", "version [--json]", "help"} {
+		if !strings.Contains(stdout, want) {
+			t.Errorf("usage missing %q:\n%s", want, stdout)
+		}
+	}
 }
 
 func TestRun(t *testing.T) {
@@ -107,7 +192,7 @@ func TestVersionWriteFailure(t *testing.T) {
 
 	for _, args := range [][]string{{"version"}, {"version", "--json"}} {
 		var errOut bytes.Buffer
-		if code := testCmd.Run(args, failingWriter{}, &errOut); code != ExitError {
+		if code := testCmd.Run(context.Background(), args, failingWriter{}, &errOut); code != ExitError {
 			t.Errorf("Run(%v) with failing stdout = %d, want %d", args, code, ExitError)
 		}
 	}

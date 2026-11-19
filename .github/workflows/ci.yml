@@ -20,10 +20,20 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # NixOS VM tests (checks.*.nixos-*) need KVM. GitHub's Linux runners
+      # expose /dev/kvm but only to root by default.
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
+            system-features = nixos-test benchmark big-parallel kvm
 
       - name: nix flake check
         run: nix flake check --print-build-logs

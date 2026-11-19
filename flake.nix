@@ -47,46 +47,23 @@
     in
     {
       packages = forAllSystems (pkgs: {
-        strata = pkgs.buildGoModule {
-          pname = "strata";
-          inherit version;
+        strata = pkgs.callPackage ./nix/packages/strata.nix {
           src = goSrc;
-
-          # No third-party Go dependencies yet (ADR-0004).
-          vendorHash = null;
-
-          subPackages = [
-            "cmd/strata"
-            "cmd/strata-api"
-            "cmd/strata-agent"
-            "cmd/strata-controller"
-          ];
-
-          env.CGO_ENABLED = "0";
-          ldflags = [
-            "-s"
-            "-w"
-            "-X github.com/letthemplay/Strata/internal/version.version=${version}"
-            "-X github.com/letthemplay/Strata/internal/version.commit=${commit}"
-          ];
-
-          # Run the full Go unit test suite as part of the build.
-          doCheck = true;
-          checkFlags = [ "-v" ];
-          preCheck = ''
-            # buildGoModule only tests subPackages by default; test everything.
-            unset subPackages
-          '';
-
-          meta = {
-            description = "Declarative, NixOS-native bare-metal virtualization platform";
-            mainProgram = "strata";
-            platforms = systems;
-          };
+          inherit version commit;
         };
 
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.strata;
       });
+
+      nixosModules = {
+        strata =
+          { lib, pkgs, ... }:
+          {
+            imports = [ ./nix/modules ];
+            strata.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.strata;
+          };
+        default = self.nixosModules.strata;
+      };
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
@@ -188,6 +165,18 @@
               '';
 
           examples = import ./nix/tests/examples.nix { inherit pkgs lib; };
+
+          module-eval = import ./nix/tests/modules.nix {
+            inherit
+              self
+              nixpkgs
+              pkgs
+              lib
+              ;
+          };
+
+          # NixOS VM test (requires KVM).
+          nixos-agent = import ./nix/tests/nixos/agent.nix { inherit self pkgs; };
         }
       );
     };

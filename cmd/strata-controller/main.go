@@ -1,9 +1,10 @@
 // Command strata-controller is the Strata control-plane controller.
 //
-// In milestone M0 it only reports build information.
+// It currently only reports build information.
 package main
 
 import (
+	"context"
 	"os"
 
 	"github.com/letthemplay/Strata/internal/cli"
@@ -11,5 +12,5 @@ import (
 
 func main() {
 	cmd := cli.Command{Name: "strata-controller", Summary: "Strata control-plane controller"}
-	os.Exit(cmd.Run(os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(cmd.Run(context.Background(), os.Args[1:], os.Stdout, os.Stderr))
 }

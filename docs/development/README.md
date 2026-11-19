@@ -38,6 +38,8 @@ Optional: with direnv, create an untracked `.envrc` containing `use flake`.
 | `nix-fmt` | nixfmt formatting of all `.nix` files |
 | `nix-lint` | statix and deadnix |
 | `examples` | Evaluates `examples/standalone/strata.nix` and checks its structure |
+| `module-eval` | Evaluates NixOS configurations using the Strata modules: option validation, assertions, generated config |
+| `nixos-agent` | NixOS VM test: boots a host with the agent and checks identity, hardware report, privileges, reload and shutdown (needs KVM) |
 
 Nix flakes only see files tracked by Git. Run `git add` on new files before
 `nix flake check` or `nix build`, otherwise they are silently ignored.
@@ -56,3 +58,14 @@ Nix flakes only see files tracked by Git. Run `git add` on new files before
 
 `.github/workflows/ci.yml` runs `nix flake check`, then format check, lint,
 tests and race-detector tests inside the development shell.
+
+## NixOS VM tests
+
+VM tests live in `nix/tests/nixos/` and run as part of `nix flake check`.
+They need KVM (`/dev/kvm` and the `kvm`/`nixos-test` Nix system features).
+To debug one interactively:
+
+```sh
+nix build .#checks.x86_64-linux.nixos-agent.driverInteractive
+./result/bin/nixos-test-driver   # then: start_all(), hv01.shell_interact()
+```

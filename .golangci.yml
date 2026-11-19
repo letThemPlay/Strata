@@ -42,6 +42,11 @@ linters:
       - path: _test\.go
         linters:
           - gochecknoglobals
+      # Tests read files they created themselves under t.TempDir().
+      - path: _test\.go
+        linters:
+          - gosec
+        text: "G304"
 
 formatters:
   enable:

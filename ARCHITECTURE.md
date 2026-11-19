@@ -1,6 +1,6 @@
 # Strata Architecture
 
-**Status:** Milestone M1 in progress (slice 1 complete). This document describes the target
+**Status:** Milestone M1 in progress (slices 1–2 complete). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
 
@@ -93,7 +93,7 @@ today:
 | `internal/hardware` | Hardware discovery from procfs/sysfs (no exec) |
 | `internal/agent` | Agent run loop, atomic report writing, agent subcommands |
 | `nix/packages/` | Package definitions (`strata`) |
-| `nix/modules/` | NixOS modules: `base` (identity), `agent` (service) |
+| `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring` |
 | `nix/tests/` | Nix evaluation tests and NixOS VM tests (`nixos/`) |
 | `examples/standalone/` | Non-normative sample infrastructure configuration |
 | `docs/` | Development and administration documentation |
@@ -117,7 +117,7 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | NixOS options `strata.{enable,package,node.id,node.role,agent.enable}` | **Implemented** (M1 slice 1, experimental) — see [options](docs/administration/options.md) |
 | Hardware discovery (`strata-agent discover`, `/var/lib/strata/hardware.json`) | **Implemented** (M1 slice 1, experimental; schema `v1alpha1`) |
 | Agent systemd service (unprivileged, no network) | **Implemented** (M1 slice 1, experimental) |
-| Host modules: compute/libvirt, SSH, networking, monitoring | Planned (M1 slice 2) |
+| NixOS options `strata.{compute,access,networking,monitoring}.*` (libvirt, key-only SSH, management network + nftables, node exporter) | **Implemented** (M1 slice 2, experimental) |
 | Disk layouts (disko), reference host configuration | Planned (M1 slice 3) |
 | Installer ISO and `strata-install` | Planned (M1 slice 4) |
 | Physical hardware validation | Planned (M1 slice 5) |
@@ -137,7 +137,7 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
 2. Host modules: `strata.compute` (libvirtd/QEMU; KVM modules are
    autoloaded by udev from CPU features, nothing vendor-specific is
    hardcoded), SSH key-only access, management networking with nftables,
-   node exporter on the management network.
+   node exporter on the management network. **Done.**
 3. Reference host configuration and disko layouts (ext4 default; ZFS
    optional and gated on kernel support).
 4. Installer ISO and `strata-install` (answer file or interactive prompts;
@@ -213,6 +213,8 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
 - **Consequence:** The hardware report lives under
   `/var/lib/private/strata` (exposed as `/var/lib/strata`) and is readable by
   root only. Remote access to the agent arrives with authentication (M5).
+- **Update (M1 slice 2):** the agent still has no libvirt access. Nothing in
+  the agent uses libvirt yet; access is added with the M2 libvirt provider.
 
 ### ADR-0008: Versioned hardware report
 
@@ -232,3 +234,33 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   prompts. A web installer is deferred until the M5 API and authentication
   exist.
 - **Status:** Accepted; implemented in M1 slices 3 and 4.
+
+### ADR-0010: Administrative access through a dedicated admin account
+
+- **Decision:** SSH accepts public keys only. Root login is disabled; admins
+  log in as a dedicated, password-locked account (`strata-admin` by default)
+  in `wheel` with passwordless sudo. `AllowUsers` is limited to that account
+  by default. At least one key is required (lockout prevention).
+- **Rationale:** Logins are attributable to an account rather than to root,
+  and root is never exposed to the network.
+- **Consequence:** With no passwords, the admin's SSH keys are
+  root-equivalent. Per-admin accounts and finer-grained authorization arrive
+  with RBAC (M5).
+
+### ADR-0011: systemd-networkd and an interface-scoped firewall for management
+
+- **Decision:** Strata hosts use systemd-networkd. The management interface is
+  configured by `10-strata-management.network` (static or DHCP). The nftables
+  firewall opens no ports globally; management services are allowed only on
+  the management interface, and globally opened ports fail evaluation.
+  Services may still bind to all addresses: the firewall is the enforcement
+  point (verified by the `nixos-host` VM test from a non-management network).
+- **libvirt networks:** NixOS defines libvirt's `default` NAT network but does
+  not autostart it. Strata leaves it inactive; the VM test asserts that no
+  libvirt network is active or autostarted and that `virbr0` does not exist.
+  Guest networking is provided by Strata network providers (M2).
+- **Known limitation:** disruptive network changes are not rolled back
+  automatically yet. Recovery relies on NixOS generations (`nixos-rebuild
+  test`, boot-menu rollback) and console access. Automatic rollback belongs to
+  the M3 executor. VLAN-tagged and bonded management interfaces are deferred
+  to M2.

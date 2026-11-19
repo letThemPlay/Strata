@@ -19,6 +19,21 @@ Import the module through the flake:
             enable = true;
             node.id = "hv-01";
             agent.enable = true;
+            compute.enable = true;
+            access = {
+              enable = true;
+              admin.authorizedKeys = [ "ssh-ed25519 AAAA... admin@workstation" ];
+            };
+            networking = {
+              enable = true;
+              management = {
+                interface = "eno1";
+                addresses = [ "192.0.2.10/24" ];
+                gateway4 = "192.0.2.1";
+                dns = [ "192.0.2.53" ];
+              };
+            };
+            monitoring.enable = true;
           };
         }
       ];
@@ -27,26 +42,98 @@ Import the module through the flake:
 }
 ```
 
+Every `strata.<module>.enable` below requires `strata.enable`.
+
+## Base
+
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `strata.enable` | bool | `false` | Enable Strata on this host. Installs the Strata binaries and writes `/etc/strata/node.json`. |
 | `strata.package` | package | flake's `strata` package | Package providing the binaries. Set automatically by `nixosModules.default`. |
-| `strata.node.id` | null or RFC 1123 label | `null` | Stable node identifier: lowercase letters, digits and `-`, 1–63 characters, not starting or ending with `-`. Required when `strata.enable` is set. Becomes the default `networking.hostName`. |
+| `strata.node.id` | null or RFC 1123 label | `null` | Stable node identifier: lowercase letters, digits and `-`, 1–63 characters, not starting or ending with `-`. Required. Becomes the default `networking.hostName`. |
 | `strata.node.role` | `"hypervisor"` | `"hypervisor"` | Node role. No other roles exist yet. |
-| `strata.agent.enable` | bool | `false` | Run `strata-agent.service`. Requires `strata.enable`. |
+
+## Agent
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.agent.enable` | bool | `false` | Run `strata-agent.service` (hardware discovery). Unprivileged, no network access. |
+
+## Compute
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.compute.enable` | bool | `false` | Enable libvirtd with host-architecture QEMU (`qemu_kvm`). QEMU runs as the unprivileged `qemu-libvirtd` user, swtpm is available, and guests are shut down cleanly when the host shuts down. |
+
+KVM modules are not configured: udev loads `kvm-intel` or `kvm-amd` from the
+CPU's features. libvirt's built-in `default` NAT network is defined by NixOS
+but never started; guest networking will be managed by Strata (M2).
+
+## Access
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.access.enable` | bool | `false` | Enable key-only SSH for the admin account. |
+| `strata.access.admin.name` | POSIX user name, not `root` | `"strata-admin"` | Administrator account (member of `wheel`, password locked). |
+| `strata.access.admin.authorizedKeys` | list of OpenSSH public keys | `[ ]` | Keys allowed to log in as the admin. At least one is required. |
+
+sshd is configured with `PasswordAuthentication no`,
+`KbdInteractiveAuthentication no`, `PermitRootLogin no`, `X11Forwarding no`
+and `AllowUsers <admin>` (override with `mkForce` if more users need SSH).
+
+> **Warning:** the admin has passwordless sudo, because password
+> authentication is disabled. Its SSH keys are therefore root-equivalent.
+> Protect them accordingly (hardware keys via `sk-ssh-ed25519@openssh.com`
+> are supported).
+
+## Networking
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.networking.enable` | bool | `false` | Manage the management interface with systemd-networkd and enable the nftables firewall. |
+| `strata.networking.management.interface` | interface name | `null` | Management interface. Required. |
+| `strata.networking.management.addressing` | `"static"` or `"dhcp"` | `"static"` | Addressing mode. |
+| `strata.networking.management.addresses` | list of CIDR | `[ ]` | Static addresses. Required with `static`; not allowed with `dhcp`. |
+| `strata.networking.management.gateway4` / `gateway6` | null or address | `null` | Default gateways (static only). |
+| `strata.networking.management.dns` | list of addresses | `[ ]` | DNS servers (static only). |
+
+Firewall model:
+
+- Nothing is open on any interface by default.
+- SSH (with `strata.access`) and the node exporter (with `strata.monitoring`)
+  are opened **only on the management interface**.
+- Opening ports globally (`networking.firewall.allowedTCPPorts` etc.) is
+  rejected by an assertion. Use `networking.firewall.interfaces.<if>`.
+
+### Recovering from a bad network change
+
+Strata does not yet roll back network changes automatically (planned with
+the M3 executor). Until then:
+
+- Try changes with `nixos-rebuild test`: they are not made the boot default,
+  so a reboot restores the previous configuration.
+- Every `nixos-rebuild switch` creates a generation; select an older one in
+  the boot menu, or run `nixos-rebuild switch --rollback` from the console.
+- Keep out-of-band console access (IPMI/BMC or physical) for hypervisors.
+
+## Monitoring
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.monitoring.enable` | bool | `false` | Run the Prometheus node exporter (with the `systemd` collector). Requires `strata.networking.enable`. |
+| `strata.monitoring.nodeExporter.port` | port | `9100` | Exporter port, opened on the management interface only. |
 
 ## Files and services
 
 | Path / unit | Content |
 |---|---|
 | `/etc/strata/node.json` | `{"apiVersion": "node.strata.dev/v1alpha1", "id": ..., "role": ...}` |
-| `strata-agent.service` | Discovers hardware at start and on `systemctl reload`. Unprivileged, no network access. |
+| `strata-agent.service` | Discovers hardware at start and on `systemctl reload`. |
 | `/var/lib/strata/hardware.json` | Hardware report, `apiVersion: hardware.strata.dev/v1alpha1`. Root-readable only. |
-
-`strata-agent discover` prints the same report to stdout without writing
-anything.
+| `/etc/systemd/network/10-strata-management.network` | Management interface configuration. |
 
 ## Tests
 
-- `checks.<system>.module-eval`: option validation and assertions.
-- `checks.<system>.nixos-agent`: VM test of a host with the agent enabled.
+- `checks.<system>.module-eval`: option validation, assertions and generated configuration.
+- `checks.<system>.nixos-agent`: VM test of the agent.
+- `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, libvirt, KVM).

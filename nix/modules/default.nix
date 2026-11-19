@@ -4,5 +4,9 @@
   imports = [
     ./base
     ./agent
+    ./compute
+    ./access
+    ./networking
+    ./monitoring
   ];
 }

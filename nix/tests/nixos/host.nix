@@ -70,9 +70,46 @@ pkgs.testers.runNixOSTest {
   };
 
   testScript = ''
-    ssh = "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes -o ConnectTimeout=5"
+    # Every SSH call is bounded (`timeout`, keepalives) and verbose: an SSH
+    # session that stalls after key exchange is not covered by
+    # ConnectTimeout and would otherwise block until the driver's default
+    # 15-minute timeout without saying where it stopped.
+    # The client's stderr goes to a file (unbuffered, unlike `ssh -E`, so it
+    # survives a `timeout` kill) that diagnose() prints on failure.
+    def ssh(target, remote="true", opts="", refused=False):
+        return (
+            "rm -f /tmp/ssh-debug.log; "
+            + ("! " if refused else "")
+            + "timeout 60 ssh -v"
+            " -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+            " -o BatchMode=yes -o ConnectTimeout=5"
+            " -o ServerAliveInterval=5 -o ServerAliveCountMax=3"
+            f" {opts} {target} {remote} 2>/tmp/ssh-debug.log"
+        )
+
     mgmt = "192.168.1.2"
     other = "192.168.2.2"
+
+
+    def diagnose():
+        """Print client and server state relevant to SSH/login problems."""
+        print("=== admin: ssh -v log ===")
+        # ssh -v ends lines with CRLF; Nix's log output treats CR as "return to
+        # start of line", which would blank every line.
+        print(admin.execute("tr -d '\\r' < /tmp/ssh-debug.log")[1])
+        print("=== hv01: pending systemd jobs ===")
+        print(hv01.execute("systemctl list-jobs --no-pager")[1])
+        print("=== hv01: sessions ===")
+        print(hv01.execute("loginctl list-sessions --no-pager; ps -eo pid,etimes,stat,cmd | grep -E 'sshd|sudo|systemd --user' | grep -v grep")[1])
+        print("=== hv01: journal (sshd, logind, user managers, firewall, libvirtd, networkd) ===")
+        print(
+            hv01.execute(
+                "journalctl -b --no-pager -o short-monotonic"
+                " -u sshd.service -u 'sshd@*' -u systemd-logind.service -u 'user@*'"
+                " -u nftables.service -u libvirtd.service -u systemd-networkd.service"
+                " | tail -n 200"
+            )[1]
+        )
 
     start_all()
     hv01.wait_for_unit("multi-user.target")
@@ -92,18 +129,29 @@ pkgs.testers.runNixOSTest {
         assert "192.168.1.2" in status, status
         admin.wait_until_succeeds(f"ping -c 1 -W 2 {mgmt}")
 
-    with subtest("admin logs in with a key and can use sudo"):
-        out = admin.succeed(f"{ssh} strata-admin@{mgmt} 'sudo -n id -un'").strip()
-        assert out == "root", out
+    try:
+        with subtest("admin logs in with a key and can use sudo"):
+            out = admin.succeed(
+                ssh(f"strata-admin@{mgmt}", "'sudo -n id -un'")
+            ).strip()
+            assert out == "root", out
 
-    with subtest("password and keyboard-interactive authentication are not offered"):
-        err = admin.fail(
-            f"{ssh} -o PubkeyAuthentication=no strata-admin@{mgmt} true 2>&1"
-        )
-        assert "Permission denied (publickey)" in err, err
+        # For refusals, a non-zero exit alone is not enough (a `timeout` kill
+        # also exits non-zero): require sshd's refusal in the client log.
+        with subtest("password and keyboard-interactive authentication are not offered"):
+            admin.succeed(
+                ssh(f"strata-admin@{mgmt}", opts="-o PubkeyAuthentication=no", refused=True)
+                + " && grep -F 'Permission denied (publickey)' /tmp/ssh-debug.log"
+            )
 
-    with subtest("root login is refused even with an authorized key"):
-        admin.fail(f"{ssh} root@{mgmt} true")
+        with subtest("root login is refused even with an authorized key"):
+            admin.succeed(
+                ssh(f"root@{mgmt}", refused=True)
+                + " && grep -F 'Permission denied' /tmp/ssh-debug.log"
+            )
+    except Exception:
+        diagnose()
+        raise
 
     with subtest("node exporter is reachable on the management network"):
         metrics = admin.succeed(f"curl -sf http://{mgmt}:9100/metrics")

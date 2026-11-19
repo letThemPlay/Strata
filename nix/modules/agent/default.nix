@@ -32,7 +32,7 @@ in
 
       serviceConfig = {
         Type = "simple";
-        ExecStart = "${lib.getExe' cfg.package "strata-agent"} run --state-dir /var/lib/strata";
+        ExecStart = "${lib.getExe' cfg.package "strata-agent"} run --state-dir /var/lib/strata --interval 1m";
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
         RestartSec = 5;

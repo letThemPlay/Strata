@@ -134,7 +134,11 @@ pkgs.testers.runNixOSTest {
         if ext:
             hv01.succeed("test -c /dev/kvm")
             hv01.succeed("virsh -c qemu:///system domcapabilities --virttype kvm > /dev/null")
-            hv01.succeed("grep -q '\"kvmDevice\": true' /var/lib/strata/hardware.json")
+            # The KVM module may load after the agent's first discovery (seen on
+            # CI); periodic discovery (every minute) must pick it up.
+            hv01.wait_until_succeeds(
+                "grep -q '\"kvmDevice\": true' /var/lib/strata/hardware.json", timeout=120
+            )
             print(f"KVM check ran ({ext})")
         else:
             print("SKIPPED KVM check: no vmx/svm in the test VM (no nested virtualization)")

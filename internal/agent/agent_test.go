@@ -1,12 +1,16 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
+	"io/fs"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"testing/fstest"
@@ -183,5 +187,100 @@ func assertNoTempFiles(t *testing.T, dir string) {
 		if strings.HasPrefix(e.Name(), ".") {
 			t.Errorf("leftover temporary file %s", e.Name())
 		}
+	}
+}
+
+// switchFS is an fs.FS whose backing filesystem can be replaced while the
+// agent is running, simulating hardware changes after start-up.
+type switchFS struct {
+	mu  sync.Mutex
+	cur fstest.MapFS
+}
+
+func (s *switchFS) Open(name string) (fs.File, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cur.Open(name)
+}
+
+func (s *switchFS) set(m fstest.MapFS) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.cur = m
+}
+
+// lockedBuffer is a goroutine-safe log sink.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestRunPeriodicDiscovery(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	stop := startAgent(t, Options{StateDir: dir, Root: hostFS(), Interval: 10 * time.Millisecond})
+	defer func() { _ = stop() }()
+
+	path := filepath.Join(dir, HardwareReportFile)
+	waitFor(t, func() bool { _, err := os.Stat(path); return err == nil })
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	// No reload signal: only the periodic cycle can recreate the report.
+	waitFor(t, func() bool { _, err := os.Stat(path); return err == nil })
+}
+
+// TestRunPicksUpLateKVMDevice reproduces a host where the KVM module is
+// loaded after the agent started: the report must eventually reflect it.
+func TestRunPicksUpLateKVMDevice(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	root := &switchFS{cur: hostFS()}
+	logs := &lockedBuffer{}
+	stop := startAgent(t, Options{
+		StateDir: dir,
+		Root:     root,
+		Interval: 10 * time.Millisecond,
+		Logger:   slog.New(slog.NewJSONHandler(logs, nil)),
+	})
+	defer func() { _ = stop() }()
+
+	path := filepath.Join(dir, HardwareReportFile)
+	waitFor(t, func() bool { _, err := os.Stat(path); return err == nil })
+	if readReport(t, path).Virtualization.KVMDevice {
+		t.Fatal("initial report claims /dev/kvm exists")
+	}
+
+	withKVM := hostFS()
+	withKVM["dev/kvm"] = &fstest.MapFile{}
+	root.set(withKVM)
+
+	waitFor(t, func() bool { return readReport(t, path).Virtualization.KVMDevice })
+	waitFor(t, func() bool { return strings.Contains(logs.String(), `"msg":"hardware report changed"`) })
+	if strings.Count(logs.String(), `"level":"INFO","msg":"hardware report unchanged"`) != 0 {
+		t.Error("unchanged reports must not be logged at info level")
+	}
+}
+
+func TestRunRejectsNegativeInterval(t *testing.T) {
+	t.Parallel()
+
+	err := Run(context.Background(), Options{StateDir: t.TempDir(), Root: hostFS(), Interval: -time.Second})
+	if err == nil || !strings.Contains(err.Error(), "invalid discovery interval") {
+		t.Errorf("Run error = %v, want invalid interval error", err)
 	}
 }

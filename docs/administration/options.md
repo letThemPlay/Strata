@@ -128,7 +128,7 @@ the M3 executor). Until then:
 | Path / unit | Content |
 |---|---|
 | `/etc/strata/node.json` | `{"apiVersion": "node.strata.dev/v1alpha1", "id": ..., "role": ...}` |
-| `strata-agent.service` | Discovers hardware at start and on `systemctl reload`. |
+| `strata-agent.service` | Discovers hardware at start, every minute, and on `systemctl reload`. Changes are logged at info level. |
 | `/var/lib/strata/hardware.json` | Hardware report, `apiVersion: hardware.strata.dev/v1alpha1`. Root-readable only. |
 | `/etc/systemd/network/10-strata-management.network` | Management interface configuration. |
 

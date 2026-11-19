@@ -225,6 +225,10 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   `apiVersion: node.strata.dev/v1alpha1`.
 - **Consequence:** `v1alpha1` may change incompatibly; consumers must check
   `apiVersion`. Fields needing root (e.g. DMI serial numbers) are omitted.
+- **Freshness:** the agent rediscovers every minute (and on reload), so
+  hardware that appears after boot is reported. A one-shot discovery at
+  start-up proved insufficient: on CI the KVM module loaded after the agent's
+  first discovery, leaving `kvmDevice: false` in the report indefinitely.
 
 ### ADR-0009: Installation uses disko and a CLI installer
 

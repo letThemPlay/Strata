@@ -160,5 +160,9 @@ pkgs.testers.runNixOSTest {
         ).strip().splitlines()[-1]
         running = installed.succeed("readlink -f /run/current-system").strip()
         assert built == running, f"/etc/nixos evaluates to {built}, running {running}"
+
+    # Stop the VM without the driver's final `sync` in running VMs, which hung
+    # on CI after a passing run; its disk is discarded anyway.
+    installed.crash()
   '';
 }

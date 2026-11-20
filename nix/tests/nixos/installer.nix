@@ -38,11 +38,18 @@ let
   ];
   iso = testInstaller.config.system.build.isoImage;
 
+  # The answer file the init wizard should write (plus the interface name).
   answers = {
     apiVersion = "install.strata.dev/v1alpha1";
     node.id = "hv-07";
-    admin.authorizedKeys = [ keys.snakeOilEd25519PublicKey ];
-    disk.device = "/dev/disk/by-id/virtio-strata-target";
+    admin = {
+      name = "strata-admin";
+      authorizedKeys = [ keys.snakeOilEd25519PublicKey ];
+    };
+    disk = {
+      device = "/dev/disk/by-id/virtio-strata-target";
+      layout = "ext4";
+    };
     network.addressing = "dhcp";
   };
 in
@@ -91,9 +98,30 @@ pkgs.testers.runNixOSTest {
     installer.wait_for_unit("multi-user.target")
 
     nic = installer.succeed("ls /sys/class/net | grep -vx lo").strip()
-    answers = json.loads('${builtins.toJSON answers}')
-    answers["network"]["interface"] = nic
-    installer.succeed(f"cat > /tmp/answer.json <<'EOF'\n{json.dumps(answers, indent=2)}\nEOF")
+    expected = json.loads('${builtins.toJSON answers}')
+    expected["network"]["interface"] = nic
+    installer.succeed("echo '${keys.snakeOilEd25519PublicKey}' > /tmp/admin.pub")
+
+    def wizard_input(*extra):
+        """Answers to strata-install init on this VM, then extra lines."""
+        lines = [
+            "hv-07",           # node ID
+            "",                # admin account: default
+            "2", "/tmp/admin.pub", "y", "n",  # keys from a file; use them; no more
+            "",                # disk: the only usable one is the default
+            "",                # interface: the only one
+            "1",               # DHCP
+            *extra,
+        ]
+        installer.succeed("cat > /tmp/wizard.in <<'EOF'\n" + "\n".join(lines) + "\nEOF")
+
+    with subtest("init writes the answer file"):
+        wizard_input("n")  # do not install now
+        out = run(installer, "strata-install init --output /tmp/answer.json < /tmp/wizard.in")
+        assert "virtio-strata-target" in out and "Install now?" in out, out
+        written = json.loads(installer.succeed("cat /tmp/answer.json"))
+        assert written == expected, f"{written} != {expected}"
+        installer.fail("strata-install init --output /tmp/answer.json < /tmp/wizard.in")
 
     with subtest("plan describes the installation"):
         out = run(installer, "strata-install plan /tmp/answer.json")
@@ -115,13 +143,13 @@ pkgs.testers.runNixOSTest {
         assert "nothing was changed" in out, out
         installer.succeed("test -z \"$(wipefs --no-act --noheadings /dev/vda)\"")
 
-    with subtest("apply installs the host"):
+    with subtest("init installs the host after the typed confirmation"):
+        wizard_input("y", "/dev/disk/by-id/virtio-strata-target")
         run(
             installer,
-            "strata-install apply"
-            " --confirm-wipe /dev/disk/by-id/virtio-strata-target"
+            "strata-install init --force --output /tmp/answer.json"
             " --extra-module /etc/strata-test/extra-module.nix"
-            " /tmp/answer.json",
+            " < /tmp/wizard.in",
             timeout=1800,
         )
         installer.succeed("! findmnt /mnt")

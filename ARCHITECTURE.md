@@ -126,7 +126,7 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | NixOS options `strata.{compute,access,networking,monitoring}.*` (libvirt, key-only SSH, management network + nftables, node exporter) | **Implemented** (M1 slice 2, experimental) |
 | `strata.disk` (disko ext4 layout, systemd-boot, UEFI), host flake template, reference host | **Implemented** (M1 slice 3, experimental) |
 | Installer ISO and `strata-install plan/apply` (answer file, offline install) | **Implemented** (M1 slice 4a, experimental) |
-| `strata-install init` (interactive answer file wizard) | Planned (M1 slice 4b) |
+| `strata-install init` (interactive answer file wizard) | **Implemented** (M1 slice 4b, experimental) |
 | Physical hardware validation | Planned (M1 slice 5) |
 | VM management (libvirt) | Planned (M2) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
@@ -153,7 +153,8 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
    - 4a: `plan`/`apply` driven by a JSON answer file; offline installation
      from the ISO; typed confirmation before erasing the disk; the host flake
      is stored in `/etc/nixos` as a Git repository. **Done.**
-   - 4b: `init`, an interactive wizard that writes the answer file.
+   - 4b: `init`, an interactive wizard that writes the answer file, checks
+     it like `plan` and offers to install. **Done.**
 5. Installation guide and validation on physical Intel and AMD hardware.
 
 ## Architecture decision records
@@ -361,6 +362,19 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
     Git credentials.
   - External programs (`nix`, `nixos-install`, `git`, the disko script) are
     run with explicit arguments and timeouts, never through a shell.
+  - `strata-install init` (slice 4b) is an interactive front end that only
+    produces an answer file: it offers the machine's whole disks (by their
+    `/dev/disk/by-id/` names, with the same checks as `plan`) and
+    interfaces, validates every answer with the answer file's rules, writes
+    the file and then follows the same `plan`/`apply` path, including the
+    typed erase confirmation. Hand-written and generated answer files are
+    therefore treated identically. SSH keys can be pasted, read from a file
+    or downloaded over HTTPS (redirects must stay on HTTPS, size and time
+    are limited); each key is shown with its SHA256 fingerprint for the
+    operator to compare before it is accepted. This download is the only
+    optional network use of the installer. Key lines are checked beyond
+    their syntax: the base64 data must decode and name the key type the line
+    claims.
 - **Testing:** unit tests use a fake command runner and filesystem fixtures,
   including the rule that nothing destructive runs before a successful build
   and a confirmation. The `nixos-installer` VM test boots the real ISO image
@@ -369,6 +383,9 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   disk alone and checks that `/etc/nixos` evaluates offline to exactly the
   running system. `--extra-module` (a site-specific NixOS module copied into
   the host flake) is how the test adds the test driver's instrumentation.
+  The test drives `init` with scripted input: it compares the written
+  answer file with the expected one and installs through `init`'s typed
+  confirmation.
 - **Consequences:** the ISO is large (it carries a host's closure plus build
   tools). The offline build-tool list is maintained by the VM test: a
   missing tool fails it. The test must vary every per-host value: for

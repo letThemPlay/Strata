@@ -7,6 +7,8 @@
 package install
 
 import (
+	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -120,22 +122,18 @@ func (a Answers) Validate() error {
 		add("apiVersion", "must be %q, got %q", APIVersion, a.APIVersion)
 	}
 
-	if !nodeIDPattern.MatchString(a.Node.ID) {
-		add("node.id", "%q is not a valid node ID (lowercase letters, digits and '-', 1-63 characters, not starting or ending with '-')", a.Node.ID)
+	if err := checkNodeID(a.Node.ID); err != nil {
+		add("node.id", "%v", err)
 	}
-
-	switch {
-	case !userNamePattern.MatchString(a.Admin.Name):
-		add("admin.name", "%q is not a valid user name", a.Admin.Name)
-	case a.Admin.Name == "root":
-		add("admin.name", "must not be root (root login is disabled)")
+	if err := checkAdminName(a.Admin.Name); err != nil {
+		add("admin.name", "%v", err)
 	}
 	if len(a.Admin.AuthorizedKeys) == 0 {
 		add("admin.authorizedKeys", "at least one key is required, otherwise nobody can log in")
 	}
 	for i, k := range a.Admin.AuthorizedKeys {
-		if !sshKeyPattern.MatchString(k) {
-			add(fmt.Sprintf("admin.authorizedKeys[%d]", i), "not a supported OpenSSH public key (one line: type, base64 key, optional comment)")
+		if err := checkSSHKey(k); err != nil {
+			add(fmt.Sprintf("admin.authorizedKeys[%d]", i), "%v", err)
 		}
 	}
 
@@ -174,24 +172,104 @@ func (n Network) validate() []error {
 	}
 
 	for i, s := range n.Addresses {
-		if p, err := netip.ParsePrefix(s); err != nil || p.Addr().Zone() != "" {
-			add(fmt.Sprintf("addresses[%d]", i), "%q is not an address with prefix length (e.g. 192.0.2.10/24)", s)
+		if err := checkAddressPrefix(s); err != nil {
+			add(fmt.Sprintf("addresses[%d]", i), "%v", err)
 		}
 	}
 	if n.Gateway4 != "" {
-		if a, err := netip.ParseAddr(n.Gateway4); err != nil || !a.Is4() {
-			add("gateway4", "%q is not an IPv4 address", n.Gateway4)
+		if err := checkIPv4(n.Gateway4); err != nil {
+			add("gateway4", "%v", err)
 		}
 	}
 	if n.Gateway6 != "" {
-		if a, err := netip.ParseAddr(n.Gateway6); err != nil || !a.Is6() || a.Is4In6() || a.Zone() != "" {
-			add("gateway6", "%q is not an IPv6 address", n.Gateway6)
+		if err := checkIPv6(n.Gateway6); err != nil {
+			add("gateway6", "%v", err)
 		}
 	}
 	for i, s := range n.DNS {
-		if a, err := netip.ParseAddr(s); err != nil || a.Zone() != "" {
-			add(fmt.Sprintf("dns[%d]", i), "%q is not an IP address", s)
+		if err := checkIP(s); err != nil {
+			add(fmt.Sprintf("dns[%d]", i), "%v", err)
 		}
 	}
 	return errs
+}
+
+// Field checks shared by Validate and the init wizard.
+
+func checkNodeID(s string) error {
+	if !nodeIDPattern.MatchString(s) {
+		return fmt.Errorf("%q is not a valid node ID (lowercase letters, digits and '-', 1-63 characters, not starting or ending with '-')", s)
+	}
+	return nil
+}
+
+func checkAdminName(s string) error {
+	switch {
+	case !userNamePattern.MatchString(s):
+		return fmt.Errorf("%q is not a valid user name", s)
+	case s == "root":
+		return errors.New("must not be root (root login is disabled)")
+	}
+	return nil
+}
+
+// checkSSHKey checks that k is one OpenSSH public key line whose key data
+// is valid base64 and starts with the key type the line names.
+func checkSSHKey(k string) error {
+	const msg = "not a supported OpenSSH public key (one line: type, base64 key, optional comment)"
+	if !sshKeyPattern.MatchString(k) {
+		return errors.New(msg)
+	}
+	fields := strings.SplitN(k, " ", 3)
+	blob, err := base64.StdEncoding.DecodeString(fields[1])
+	if err != nil {
+		return errors.New(msg + ": the key data is not valid base64")
+	}
+	// The blob starts with the key type as an SSH string: a 4-byte
+	// big-endian length and the name.
+	if len(blob) < 4 {
+		return errors.New(msg + ": the key data is truncated")
+	}
+	n := binary.BigEndian.Uint32(blob)
+	if rest := blob[4:]; int64(n) > int64(len(rest)) || string(rest[:n]) != fields[0] {
+		return fmt.Errorf("%s: the key data is not a %s key", msg, fields[0])
+	}
+	return nil
+}
+
+func checkAddressPrefix(s string) error {
+	if p, err := netip.ParsePrefix(s); err != nil || p.Addr().Zone() != "" {
+		return fmt.Errorf("%q is not an address with prefix length (e.g. 192.0.2.10/24)", s)
+	}
+	return nil
+}
+
+func checkIPv4(s string) error {
+	if a, err := netip.ParseAddr(s); err != nil || !a.Is4() {
+		return fmt.Errorf("%q is not an IPv4 address", s)
+	}
+	return nil
+}
+
+func checkIPv6(s string) error {
+	if a, err := netip.ParseAddr(s); err != nil || !a.Is6() || a.Is4In6() || a.Zone() != "" {
+		return fmt.Errorf("%q is not an IPv6 address", s)
+	}
+	return nil
+}
+
+func checkIP(s string) error {
+	if a, err := netip.ParseAddr(s); err != nil || a.Zone() != "" {
+		return fmt.Errorf("%q is not an IP address", s)
+	}
+	return nil
+}
+
+// MarshalAnswers encodes a as an indented answer file.
+func MarshalAnswers(a Answers) ([]byte, error) {
+	data, err := json.MarshalIndent(a, "", "  ")
+	if err != nil {
+		return nil, fmt.Errorf("encode answers: %w", err)
+	}
+	return append(data, '\n'), nil
 }

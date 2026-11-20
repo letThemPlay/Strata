@@ -126,7 +126,11 @@ pkgs.testers.runNixOSTest {
         )
         installer.succeed("! findmnt /mnt")
 
-    installer.shutdown()
+    # Flush the disk, then stop the VM without a guest shutdown: the live
+    # system's poweroff stalled on CI while stopping units, and there is
+    # nothing left to save. QEMU flushes the qcow2 image when it quits.
+    installer.succeed("sync && blockdev --flushbufs /dev/vda")
+    installer.crash()
 
     installed = create_machine(qemu(3072), name="installed")
     driver.machines_qemu.append(installed)

@@ -96,6 +96,8 @@ func TestRunCommandFailures(t *testing.T) {
 		{"positional args", []string{"run", "extra"}, cli.ExitUsage},
 		{"help flag", []string{"run", "-h"}, cli.ExitOK},
 		{"unwritable state dir", []string{"run", "--state-dir", missing}, cli.ExitError},
+		{"invalid interval", []string{"run", "--interval", "soon"}, cli.ExitUsage},
+		{"negative interval", []string{"run", "--state-dir", missing, "--interval", "-1s"}, cli.ExitError},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

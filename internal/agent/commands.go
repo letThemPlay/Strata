@@ -10,13 +10,19 @@ import (
 	"io/fs"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/letthemplay/Strata/internal/cli"
 	"github.com/letthemplay/Strata/internal/hardware"
 )
 
-// DefaultStateDir is the agent's state directory on a Strata host.
-const DefaultStateDir = "/var/lib/strata"
+// Defaults for the "run" subcommand.
+const (
+	// DefaultStateDir is the agent's state directory on a Strata host.
+	DefaultStateDir = "/var/lib/strata"
+	// DefaultInterval is the period between automatic discovery cycles.
+	DefaultInterval = time.Minute
+)
 
 // Subcommands returns the strata-agent subcommands. root is the host
 // filesystem used for discovery and reload delivers reload requests to
@@ -25,12 +31,13 @@ func Subcommands(root fs.FS, reload <-chan os.Signal) []cli.Subcommand {
 	return []cli.Subcommand{
 		{
 			Name:    "run",
-			Usage:   "[--state-dir DIR]",
-			Summary: "Run the agent until terminated (SIGHUP re-runs discovery)",
+			Usage:   "[--state-dir DIR] [--interval DURATION]",
+			Summary: "Run the agent until terminated (discovery repeats every interval and on SIGHUP)",
 			Run: func(ctx context.Context, args []string, _, stderr io.Writer) int {
 				fset := flag.NewFlagSet("run", flag.ContinueOnError)
 				fset.SetOutput(stderr)
 				stateDir := fset.String("state-dir", DefaultStateDir, "directory for agent reports")
+				interval := fset.Duration("interval", DefaultInterval, "period between discovery cycles (0 disables)")
 				if err := fset.Parse(args); err != nil {
 					if errors.Is(err, flag.ErrHelp) {
 						return cli.ExitOK
@@ -42,7 +49,13 @@ func Subcommands(root fs.FS, reload <-chan os.Signal) []cli.Subcommand {
 					return cli.ExitUsage
 				}
 				logger := slog.New(slog.NewJSONHandler(stderr, nil))
-				err := Run(ctx, Options{StateDir: *stateDir, Root: root, Reload: reload, Logger: logger})
+				err := Run(ctx, Options{
+					StateDir: *stateDir,
+					Root:     root,
+					Reload:   reload,
+					Interval: *interval,
+					Logger:   logger,
+				})
 				if err != nil {
 					logger.ErrorContext(ctx, "agent failed", "error", err)
 					return cli.ExitError

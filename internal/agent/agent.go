@@ -15,6 +15,8 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
+	"time"
 
 	"github.com/letthemplay/Strata/internal/hardware"
 )
@@ -33,15 +35,20 @@ type Options struct {
 	// Reload triggers a new discovery cycle whenever a value is received
 	// (typically SIGHUP). May be nil.
 	Reload <-chan os.Signal
+	// Interval is the period between automatic discovery cycles. Hardware
+	// can change after the agent starts (late kernel module loading,
+	// hotplug), so the report must not be a one-time snapshot. Zero
+	// disables periodic discovery; negative values are invalid.
+	Interval time.Duration
 	// Logger receives structured logs. A nil Logger discards logs.
 	Logger *slog.Logger
 }
 
-// Run performs an initial discovery, then repeats discovery on every
-// reload signal until ctx is canceled.
+// Run performs an initial discovery, then repeats discovery every Interval
+// and on every reload signal until ctx is canceled.
 //
 // A failure of the initial discovery is returned, so that the service
-// manager can restart the agent. Failures on reload are logged and the
+// manager can restart the agent. Later failures are logged and the
 // previous report is kept.
 func Run(ctx context.Context, opts Options) error {
 	if opts.StateDir == "" {
@@ -50,15 +57,26 @@ func Run(ctx context.Context, opts Options) error {
 	if opts.Root == nil {
 		return errors.New("agent: root filesystem not set")
 	}
+	if opts.Interval < 0 {
+		return fmt.Errorf("agent: invalid discovery interval %s", opts.Interval)
+	}
 	log := opts.Logger
 	if log == nil {
 		log = slog.New(slog.DiscardHandler)
 	}
 
-	if err := refresh(opts, log); err != nil {
+	last, err := refresh(ctx, opts, log, nil)
+	if err != nil {
 		return err
 	}
-	log.InfoContext(ctx, "agent started", "stateDir", opts.StateDir)
+	log.InfoContext(ctx, "agent started", "stateDir", opts.StateDir, "interval", opts.Interval.String())
+
+	var tick <-chan time.Time
+	if opts.Interval > 0 {
+		ticker := time.NewTicker(opts.Interval)
+		defer ticker.Stop()
+		tick = ticker.C
+	}
 
 	for {
 		select {
@@ -67,30 +85,48 @@ func Run(ctx context.Context, opts Options) error {
 			return nil
 		case <-opts.Reload:
 			log.InfoContext(ctx, "reload requested")
-			if err := refresh(opts, log); err != nil {
-				log.ErrorContext(ctx, "hardware discovery failed; keeping previous report", "error", err)
-			}
+		case <-tick:
 		}
+		report, err := refresh(ctx, opts, log, last)
+		if err != nil {
+			log.ErrorContext(ctx, "hardware discovery failed; keeping previous report", "error", err)
+			continue
+		}
+		last = report
 	}
 }
 
-func refresh(opts Options, log *slog.Logger) error {
+// refresh discovers hardware and writes the report. It logs at info level
+// when the report differs from prev (or prev is nil) and at debug level
+// otherwise, so periodic discovery does not flood the journal.
+func refresh(ctx context.Context, opts Options, log *slog.Logger, prev *hardware.Report) (*hardware.Report, error) {
 	report, err := hardware.Discover(opts.Root)
 	if err != nil {
-		return fmt.Errorf("agent: discover hardware: %w", err)
+		return nil, fmt.Errorf("agent: discover hardware: %w", err)
 	}
 	path := filepath.Join(opts.StateDir, HardwareReportFile)
 	if err := WriteJSON(path, report); err != nil {
-		return fmt.Errorf("agent: %w", err)
+		return nil, fmt.Errorf("agent: %w", err)
 	}
-	log.Info("hardware report written",
+
+	level := slog.LevelInfo
+	msg := "hardware report written"
+	if prev != nil {
+		if reflect.DeepEqual(*prev, report) {
+			level = slog.LevelDebug
+			msg = "hardware report unchanged"
+		} else {
+			msg = "hardware report changed"
+		}
+	}
+	log.Log(ctx, level, msg,
 		"path", path,
 		"cpus", report.CPU.LogicalCount,
 		"memoryBytes", report.Memory.TotalBytes,
 		"virtualization", report.Virtualization.Extension,
 		"kvmDevice", report.Virtualization.KVMDevice,
 	)
-	return nil
+	return &report, nil
 }
 
 // WriteJSON atomically writes v as indented JSON to path with mode 0644.

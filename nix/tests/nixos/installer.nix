@@ -15,8 +15,8 @@ let
   inherit (pkgs) lib;
   inherit (pkgs.stdenv.hostPlatform) system;
 
-  keys = import "${pkgs.path}/nixos/tests/ssh-keys.nix" pkgs;
-  qemu-common = import "${pkgs.path}/nixos/lib/qemu-common.nix" { inherit (pkgs) lib stdenv; };
+  keys = import (pkgs.path + "/nixos/tests/ssh-keys.nix") pkgs;
+  qemu-common = import (pkgs.path + "/nixos/lib/qemu-common.nix") { inherit (pkgs) lib stdenv; };
 
   installedTestModule = ./installed-test-module.nix;
 

@@ -8,5 +8,6 @@
     ./access
     ./networking
     ./monitoring
+    ./disk
   ];
 }

@@ -15,7 +15,8 @@ let
         {
           nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
           boot.loader.grub.enable = false;
-          fileSystems."/" = {
+          # mkDefault: strata.disk defines "/" in its own cases.
+          fileSystems."/" = lib.mkDefault {
             device = "/dev/null";
             fsType = "ext4";
           };
@@ -83,6 +84,19 @@ let
   hc = host.config;
   dhcpHost = hostWith [ { strata.networking.management.addressing = "dhcp"; } ];
   mgmtUnit = hc.systemd.network.networks."10-strata-management";
+  diskHost = hostWith [
+    static
+    {
+      strata.disk = {
+        enable = true;
+        device = "/dev/disk/by-id/test-disk";
+      };
+    }
+  ];
+  templateModules = [
+    ../../templates/host/hardware-configuration.nix
+    ../../templates/host/configuration.nix
+  ];
   # Option value evaluation throws on type errors.
   rejects = sys: path: throws (lib.attrByPath path null sys.config);
 
@@ -283,6 +297,72 @@ let
       }
     ]);
     "monitoring requires strata.enable" = requiresEnable "monitoring" { };
+
+    # ---- disk ----
+    "disk generates an ESP and a root partition filling the device" =
+      let
+        d = diskHost.config.disko.devices.disk.system;
+        p = d.content.partitions;
+      in
+      d.device == "/dev/disk/by-id/test-disk"
+      && d.content.type == "gpt"
+      && p.ESP.type == "EF00"
+      && p.ESP.size == "1G"
+      && p.root.size == "100%";
+    "disk mounts root and /boot by partition label" =
+      let
+        fs = diskHost.config.fileSystems;
+      in
+      fs."/".fsType == "ext4"
+      && fs."/".device == "/dev/disk/by-partlabel/disk-system-root"
+      && fs."/boot".fsType == "vfat"
+      && fs."/boot".device == "/dev/disk/by-partlabel/disk-system-ESP"
+      && lib.elem "umask=0077" fs."/boot".options;
+    "disk boots with systemd-boot, not GRUB" =
+      let
+        l = diskHost.config.boot.loader;
+      in
+      l.systemd-boot.enable && l.systemd-boot.configurationLimit == 10 && !l.grub.enable;
+    "full disk host has no failed assertions" = failedAssertions diskHost == [ ];
+    "disk without a device fails an assertion" = hasFailure "strata.disk.device must be set" (hostWith [
+      static
+      { strata.disk.enable = true; }
+    ]);
+    "disk rejects device paths outside /dev" =
+      rejects
+        (eval [
+          { strata.disk.device = "sda"; }
+        ])
+        [
+          "strata"
+          "disk"
+          "device"
+        ];
+    "disk rejects unknown layouts" =
+      rejects
+        (eval [
+          { strata.disk.layout = "zfs"; }
+        ])
+        [
+          "strata"
+          "disk"
+          "layout"
+        ];
+    "disk requires strata.enable" = requiresEnable "disk" { device = "/dev/vda"; };
+    "disabled disk defines no partitions" = hc.disko.devices.disk == { };
+
+    # ---- host template ----
+    "unfilled template fails on exactly the values left to the user" =
+      let
+        failures = failedAssertions (eval templateModules);
+        mentions = needle: lib.any (lib.hasInfix needle) failures;
+      in
+      lib.length failures == 3
+      && mentions "authorizedKeys"
+      && mentions "strata.disk.device"
+      && mentions "management.interface";
+    "reference host has no failed assertions" =
+      failedAssertions (eval (templateModules ++ [ ../hosts/reference.nix ])) == [ ];
 
     # ---- base and agent ----
     "valid config has no failed assertions" = failedAssertions valid == [ ];

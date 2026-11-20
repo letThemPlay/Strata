@@ -3,10 +3,20 @@
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
+
+    # Declarative partitioning (ADR-0012). Shares our nixpkgs.
+    disko = {
+      url = "github:nix-community/disko";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
-    { self, nixpkgs }:
+    {
+      self,
+      nixpkgs,
+      disko,
+    }:
     let
       inherit (nixpkgs) lib;
 
@@ -44,6 +54,20 @@
         root = ./.;
         fileset = lib.fileset.fileFilter (file: file.hasExt "nix") ./.;
       };
+
+      # The reference host: the host template plus test values for what the
+      # template leaves to the user (nix/hosts/reference.nix).
+      mkReferenceHost =
+        system:
+        nixpkgs.lib.nixosSystem {
+          modules = [
+            self.nixosModules.default
+            ./templates/host/hardware-configuration.nix
+            ./templates/host/configuration.nix
+            ./nix/hosts/reference.nix
+            { nixpkgs.hostPlatform = system; }
+          ];
+        };
     in
     {
       packages = forAllSystems (pkgs: {
@@ -59,11 +83,24 @@
         strata =
           { lib, pkgs, ... }:
           {
-            imports = [ ./nix/modules ];
+            imports = [
+              disko.nixosModules.disko
+              ./nix/modules
+            ];
             strata.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.strata;
           };
         default = self.nixosModules.strata;
       };
+
+      templates = {
+        host = {
+          path = ./templates/host;
+          description = "Configuration flake for one Strata host";
+        };
+        default = self.templates.host;
+      };
+
+      nixosConfigurations.reference = mkReferenceHost "x86_64-linux";
 
       devShells = forAllSystems (pkgs: {
         default = pkgs.mkShell {
@@ -178,6 +215,20 @@
           # NixOS VM tests (require KVM).
           nixos-agent = import ./nix/tests/nixos/agent.nix { inherit self pkgs; };
           nixos-host = import ./nix/tests/nixos/host.nix { inherit self pkgs; };
+
+          # The reference host builds for every supported system.
+          reference-host = (mkReferenceHost system).config.system.build.toplevel;
+        }
+        # Partition an empty disk, install the reference host and boot it.
+        # x86_64 only: disko's UEFI install tests do not boot on aarch64.
+        // lib.optionalAttrs pkgs.stdenv.hostPlatform.isx86_64 {
+          nixos-install-ext4 = import ./nix/tests/nixos/install.nix {
+            inherit
+              pkgs
+              disko
+              mkReferenceHost
+              ;
+          };
         }
       );
     };

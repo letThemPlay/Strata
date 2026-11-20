@@ -53,12 +53,12 @@ func TestNixStringEscapes(t *testing.T) {
 
 func TestRenderHostNixEscapesKeyComments(t *testing.T) {
 	a := mustParse(t, dhcpAnswers)
-	a.Admin.AuthorizedKeys = []string{`ssh-ed25519 AAAA x"; } // ${builtins.abort "pwned"}`}
+	a.Admin.AuthorizedKeys = []string{makeKey("ssh-ed25519", "ssh-ed25519", 1, `x"; } // ${builtins.abort "pwned"}`)}
 	if err := a.Validate(); err != nil {
 		t.Fatalf("test key should be valid: %v", err)
 	}
 	got := RenderHostNix(a)
-	want := `"ssh-ed25519 AAAA x\"; } // \${builtins.abort \"pwned\"}"`
+	want := `"` + strings.Fields(a.Admin.AuthorizedKeys[0])[0] + " " + strings.Fields(a.Admin.AuthorizedKeys[0])[1] + ` x\"; } // \${builtins.abort \"pwned\"}"`
 	if !containsLine(got, want) {
 		t.Errorf("key not escaped as %s:\n%s", want, got)
 	}

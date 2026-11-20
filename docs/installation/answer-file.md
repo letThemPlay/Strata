@@ -3,7 +3,9 @@
 **Schema:** `install.strata.dev/v1alpha1` (experimental; may change
 incompatibly before the first release).
 
-An answer file is a single JSON object describing one host. `strata-install`
+An answer file is a single JSON object describing one host.
+`strata-install init` writes one interactively; you can also write it by
+hand. `strata-install`
 rejects unknown fields, so typos are errors rather than silently ignored
 settings. Every problem is reported at once.
 
@@ -31,7 +33,7 @@ settings. Every problem is reported at once.
 | `apiVersion` | yes | Must be `install.strata.dev/v1alpha1`. | |
 | `node.id` | yes | Node ID and hostname: lowercase letters, digits and `-`, 1–63 characters, not starting or ending with `-`. | `strata.node.id` |
 | `admin.name` | no | Admin account name. Default `strata-admin`; `root` is rejected. | `strata.access.admin.name` |
-| `admin.authorizedKeys` | yes | One or more OpenSSH public keys (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp*`, `sk-*@openssh.com`), one line each. | `strata.access.admin.authorizedKeys` |
+| `admin.authorizedKeys` | yes | One or more OpenSSH public keys (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp*`, `sk-*@openssh.com`), one line each, without `authorized_keys` options. The key data must be valid base64 of a key of the named type. | `strata.access.admin.authorizedKeys` |
 | `disk.device` | yes | The disk to erase and install on. Use a `/dev/disk/by-id/` path. | `strata.disk.device` |
 | `disk.layout` | no | Default and only value: `ext4`. See [disk layout](disk-layout.md). | `strata.disk.layout` |
 | `network.interface` | yes | Management interface name (`ip link`). | `strata.networking.management.interface` |

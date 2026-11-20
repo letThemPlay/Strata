@@ -1,9 +1,8 @@
 # Installing Strata
 
-**Status:** experimental (M1 slice 4a). The installer is tested end to end
+**Status:** experimental (M1 slice 4). The installer is tested end to end
 in a VM (`checks.x86_64-linux.nixos-installer`); installation on physical
-hardware has not been validated yet (M1 slice 5). The interactive answer
-file wizard (`strata-install init`) arrives in slice 4b.
+hardware has not been validated yet (M1 slice 5).
 
 ## Requirements
 
@@ -25,21 +24,52 @@ sudo dd if=result/iso/strata-installer-*.iso of=/dev/sdX bs=4M status=progress c
 Boot the machine from the USB stick in UEFI mode. You are logged in on the
 console as the `nixos` user, which has passwordless sudo.
 
-Find the disk and the management interface:
+## 3. Run the wizard
+
+```sh
+sudo strata-install init
+```
+
+The wizard asks for:
+
+- the **node ID**, which is also the hostname;
+- the **administrator account** (default `strata-admin`);
+- the administrator's **SSH public keys**. Password login is disabled, so
+  these keys are the only way in. You can:
+  - paste a key;
+  - read keys from a file, e.g. a `.pub` or `authorized_keys` file on a
+    USB stick you mounted;
+  - download keys over HTTPS, e.g. `https://github.com/USER.keys`. This is
+    the only step that needs network access; the installer ISO uses DHCP.
+
+  Each key is shown with its SHA256 fingerprint. Compare it with
+  `ssh-keygen -lf ~/.ssh/id_ed25519.pub` on your workstation before you
+  accept it.
+- the **system disk**, chosen from the machine's whole disks, listed by
+  their stable `/dev/disk/by-id/` names. Disks that are too small or in use
+  (such as the installation USB stick) are shown as unavailable.
+- the **management interface**, and DHCP or static addressing (addresses
+  with prefix length, gateways, DNS servers).
+
+It writes `answer.json` (`--output FILE` to choose another name; it does not
+overwrite an existing file without `--force`), shows the plan (below) and
+asks whether to install now. Answer `y` to continue with step 5 directly.
+Without `sudo`, it stops after the plan.
+
+Ctrl-C or the end of input aborts without writing anything.
+
+## 4. Or write the answer file by hand
+
+The wizard only writes an answer file; you can also write one yourself, as
+described in [answer file](answer-file.md), e.g. to install many hosts the
+same way. Find the disk and the management interface:
 
 ```sh
 ls -l /dev/disk/by-id/ | grep -v -- -part   # stable disk names
 ip link                                      # interface names
 ```
 
-## 3. Write the answer file
-
-Create `answer.json` as described in [answer file](answer-file.md), for
-example with `nano answer.json`. Copying your public key by hand is
-error-prone; you can also fetch it from a USB stick or, if the network
-works, with `curl`.
-
-## 4. Check the plan
+Then check it:
 
 ```sh
 strata-install plan answer.json
@@ -73,8 +103,10 @@ sudo strata-install apply answer.json
 Nothing is written to the disk before step 4. If the configuration does
 not evaluate or build, `apply` stops with the disk untouched.
 
-Optional: `--extra-module FILE` adds a NixOS module to the configuration
-(as `extra-module.nix`), e.g. for site-specific drivers.
+`init` accepts `apply`'s `--extra-module`, `--work-dir`, `--source-dir` and
+`--target` options for the installation it offers. `--extra-module FILE`
+adds a NixOS module to the configuration (as `extra-module.nix`), e.g. for
+site-specific drivers.
 
 ## 6. First boot
 

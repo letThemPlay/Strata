@@ -7,8 +7,8 @@ Infrastructure is described in Nix, stored in Git, and reconciled onto KVM/QEMU
 > **Status: milestone M1 in progress.** The repository contains the build,
 > development environment, NixOS modules for a hypervisor host (libvirt,
 > SSH access, management networking, monitoring, system disk layout), a
-> host configuration template, an offline installer ISO and a
-> hardware-discovery agent. There is no VM, configuration or management
+> host configuration template, an offline installer ISO with an
+> interactive installer and a hardware-discovery agent. There is no VM, configuration or management
 > functionality yet.
 > See [ARCHITECTURE.md](ARCHITECTURE.md#current-status).
 

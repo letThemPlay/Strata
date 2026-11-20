@@ -4,12 +4,14 @@ Strata is a declarative, bare-metal virtualization platform built on NixOS.
 Infrastructure is described in Nix, stored in Git, and reconciled onto KVM/QEMU
 (libvirt), LXC and Podman workloads.
 
-> **Status: milestone M1 in progress.** The repository contains the build,
-> development environment, NixOS modules for a hypervisor host (libvirt,
-> SSH access, management networking, monitoring, system disk layout), a
-> host configuration template, an offline installer ISO with an
-> interactive installer and a hardware-discovery agent. There is no VM, configuration or management
-> functionality yet.
+> **Status: milestone M1 implemented; physical hardware validation
+> pending.** The repository contains the build, development environment,
+> NixOS modules for a hypervisor host (SSH access, management networking,
+> monitoring, system disk layout, libvirtd as a host service), a host
+> configuration template, an offline installer ISO with an interactive
+> installer and a hardware-discovery agent, all tested in VMs. There is no
+> VM, container, configuration or management functionality yet; the
+> workload backend is still being decided (ADR-0015).
 > See [ARCHITECTURE.md](ARCHITECTURE.md#current-status).
 
 ## Quick start
@@ -39,6 +41,7 @@ nix flake init -t github:letThemPlay/Strata#host
 - [docs/administration/options.md](docs/administration/options.md) — implemented NixOS options
 - [docs/installation](docs/installation/README.md) — installing a host with the installer ISO
 - [docs/installation/disk-layout.md](docs/installation/disk-layout.md) — system disk layout
+- [docs/installation/hardware-validation.md](docs/installation/hardware-validation.md) — physical hardware validation (M1 acceptance)
 - [examples/standalone](examples/standalone/strata.nix) — sample (non-normative)
   infrastructure configuration
 - [CLAUDE.md](CLAUDE.md) — full project specification and roadmap

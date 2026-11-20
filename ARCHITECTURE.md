@@ -93,13 +93,16 @@ today:
 | `internal/hardware` | Hardware discovery from procfs/sysfs (no exec) |
 | `internal/agent` | Agent run loop, atomic report writing, agent subcommands |
 | `nix/packages/` | Package definitions (`strata`) |
-| `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring` |
+| `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring`, `disk` |
+| `nix/hosts/` | Test values completing the host template into the reference host |
+| `installer/partitioning/` | disko layouts used by `strata.disk` |
+| `templates/host/` | Flake template for a host configuration repository |
 | `nix/tests/` | Nix evaluation tests and NixOS VM tests (`nixos/`) |
 | `examples/standalone/` | Non-normative sample infrastructure configuration |
 | `docs/` | Development and administration documentation |
 | `.github/workflows/` | CI |
 
-Planned (not yet created): `installer/` (M1), more `nix/modules/*` (M1),
+Planned (not yet created): `installer/{iso,backend}` (M1),
 `internal/{compute,storage,networking,...}` (M2+), `internal/{gitops,schema,
 planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 `internal/cluster` (M6).
@@ -111,14 +114,14 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | Nix flake (package, dev shell, formatter, checks) | **Implemented** |
 | Go module and four binaries | **Implemented** (only the agent has functional commands) |
 | Formatting (gofumpt, goimports, nixfmt) and linting (golangci-lint, statix, deadnix) | **Implemented** |
-| Go unit tests, Nix evaluation tests, NixOS VM test | **Implemented** |
+| Go unit tests, Nix evaluation tests, NixOS VM tests (including install-and-boot) | **Implemented** |
 | GitHub Actions CI (including VM tests via KVM) | **Implemented** |
 | Sample infrastructure configuration | **Example only** — no schema, not consumed by any code |
 | NixOS options `strata.{enable,package,node.id,node.role,agent.enable}` | **Implemented** (M1 slice 1, experimental) — see [options](docs/administration/options.md) |
 | Hardware discovery (`strata-agent discover`, `/var/lib/strata/hardware.json`) | **Implemented** (M1 slice 1, experimental; schema `v1alpha1`) |
 | Agent systemd service (unprivileged, no network) | **Implemented** (M1 slice 1, experimental) |
 | NixOS options `strata.{compute,access,networking,monitoring}.*` (libvirt, key-only SSH, management network + nftables, node exporter) | **Implemented** (M1 slice 2, experimental) |
-| Disk layouts (disko), reference host configuration | Planned (M1 slice 3) |
+| `strata.disk` (disko ext4 layout, systemd-boot, UEFI), host flake template, reference host | **Implemented** (M1 slice 3, experimental) |
 | Installer ISO and `strata-install` | Planned (M1 slice 4) |
 | Physical hardware validation | Planned (M1 slice 5) |
 | VM management (libvirt) | Planned (M2) |
@@ -138,8 +141,10 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
    autoloaded by udev from CPU features, nothing vendor-specific is
    hardcoded), SSH key-only access, management networking with nftables,
    node exporter on the management network. **Done.**
-3. Reference host configuration and disko layouts (ext4 default; ZFS
-   optional and gated on kernel support).
+3. Reference host configuration and disko layouts: `strata.disk` (ext4 on a
+   single disk, UEFI, systemd-boot), the `host` flake template and the
+   reference host built from it, installed and booted in a VM test.
+   Mirrors, ZFS root and BIOS boot are deferred. **Done.**
 4. Installer ISO and `strata-install` (answer file or interactive prompts;
    explicit confirmation before wiping a disk).
 5. Installation guide and validation on physical Intel and AMD hardware.
@@ -237,7 +242,8 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   (`strata-install`) driven by a versioned answer file or interactive
   prompts. A web installer is deferred until the M5 API and authentication
   exist.
-- **Status:** Accepted; implemented in M1 slices 3 and 4.
+- **Status:** Accepted. Layouts implemented in M1 slice 3 (ADR-0012); the
+  installer follows in slice 4.
 
 ### ADR-0010: Administrative access through a dedicated admin account
 
@@ -268,3 +274,46 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   test`, boot-menu rollback) and console access. Automatic rollback belongs to
   the M3 executor. VLAN-tagged and bonded management interfaces are deferred
   to M2.
+
+### ADR-0012: System disk layout: ext4 on one disk, UEFI, systemd-boot
+
+- **Context:** M1 must install Strata on physical hardware. ADR-0009 chose
+  disko; this records the first layout and how it is consumed.
+- **Decision:** disko is a pinned flake input (following Strata's nixpkgs);
+  `nixosModules.default` imports its module. `strata.disk` selects a layout
+  from `installer/partitioning/` and a target device. The only layout,
+  `ext4`, is a GPT disk with a 1 GiB EFI system partition on `/boot`
+  (`umask=0077`) and an ext4 root filling the rest. Boot is UEFI only, with
+  systemd-boot limited to 10 generations. Filesystems are mounted by GPT
+  partition label, so the device path matters only during formatting.
+- **Rationale:** One declaration produces both the installer's formatting
+  script and the installed system's `fileSystems`, so they cannot drift. The
+  smallest layout that boots on current server hardware comes first; every
+  additional layout needs its own install-and-boot test.
+- **Consequences:** VM disks under `/var/lib/libvirt` live on the root
+  filesystem until storage pools arrive (M4, on additional disks).
+  Reinstalling formats the whole system disk, including those VM disks.
+  No swap partition is created. Mirrored system disks, ZFS root and legacy
+  BIOS boot are not supported yet. The `nixos-install-ext4` VM test installs
+  the reference host with this layout and boots it from the disk with OVMF;
+  it shares the host's Nix store with the VM, so copying the system closure
+  is tested by the installer (M1 slice 4), not here. The test runs on
+  x86_64 only.
+
+### ADR-0013: One flake per host, created from a template
+
+- **Decision:** A host's configuration is a flake in the operator's own Git
+  repository, created with `nix flake init -t github:letThemPlay/Strata#host`.
+  It takes nixpkgs from Strata's input (`nixpkgs.follows = "strata/nixpkgs"`)
+  so hosts run the nixpkgs revision Strata is tested with. The template sets
+  every Strata option except values only the operator knows (admin keys,
+  install disk, management interface); those are left unset so evaluation
+  fails with an assertion naming each one, instead of installing a host
+  nobody can log in to.
+- **Rationale:** The host repository is the Git source of truth that M3
+  synchronizes from (CLAUDE.md §8). The installer (M1 slice 4) fills in the
+  same three values plus a generated `hardware-configuration.nix`.
+- **Testing:** `nixosConfigurations.reference` is the template plus test values
+  (`nix/hosts/reference.nix`). CI builds it for every supported system, and
+  evaluation tests check that the unfilled template fails on exactly the
+  three missing values.

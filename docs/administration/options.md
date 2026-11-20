@@ -3,11 +3,22 @@
 Only options listed here are implemented and tested. Everything is
 **experimental** until the first release.
 
-Import the module through the flake:
+The easiest start is the host template, which sets every option below and
+lists the values you must fill in:
+
+```sh
+mkdir hv-01 && cd hv-01
+nix flake init -t github:letThemPlay/Strata#host
+```
+
+Written by hand, a host flake looks like this:
 
 ```nix
 {
-  inputs.strata.url = "github:letThemPlay/Strata";
+  inputs = {
+    strata.url = "github:letThemPlay/Strata";
+    nixpkgs.follows = "strata/nixpkgs";
+  };
 
   outputs = { nixpkgs, strata, ... }: {
     nixosConfigurations.hv-01 = nixpkgs.lib.nixosSystem {
@@ -34,7 +45,12 @@ Import the module through the flake:
               };
             };
             monitoring.enable = true;
+            disk = {
+              enable = true;
+              device = "/dev/disk/by-id/nvme-EXAMPLE";
+            };
           };
+          system.stateVersion = "26.05";
         }
       ];
     };
@@ -116,6 +132,22 @@ the M3 executor). Until then:
   the boot menu, or run `nixos-rebuild switch --rollback` from the console.
 - Keep out-of-band console access (IPMI/BMC or physical) for hypervisors.
 
+## Disk
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.disk.enable` | bool | `false` | Partition the system disk with disko and boot with systemd-boot (UEFI only). |
+| `strata.disk.device` | null or path under `/dev/` | `null` | Disk to install on. Required. Prefer `/dev/disk/by-id/...`; it is used only when formatting. |
+| `strata.disk.layout` | `"ext4"` | `"ext4"` | Partition layout; see [disk layout](../installation/disk-layout.md). |
+
+With `strata.disk` enabled, do not declare `fileSystems."/"` or
+`fileSystems."/boot"` yourself (generate hardware configuration with
+`nixos-generate-config --no-filesystems`); conflicting definitions fail
+evaluation. systemd-boot keeps at most 10 generations
+(`boot.loader.systemd-boot.configurationLimit`, overridable).
+
+> **Warning:** formatting destroys all data on `strata.disk.device`.
+
 ## Monitoring
 
 | Option | Type | Default | Description |
@@ -137,3 +169,5 @@ the M3 executor). Until then:
 - `checks.<system>.module-eval`: option validation, assertions and generated configuration.
 - `checks.<system>.nixos-agent`: VM test of the agent.
 - `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, libvirt, KVM).
+- `checks.<system>.reference-host`: builds the reference host (the `host` template plus test values).
+- `checks.x86_64-linux.nixos-install-ext4`: formats an empty disk with the `ext4` layout, installs the reference host and boots it under UEFI.

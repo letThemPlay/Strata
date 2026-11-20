@@ -9,14 +9,21 @@
 
   outputs =
     { nixpkgs, strata, ... }:
+    let
+      host = import ./host.nix;
+    in
     {
-      # The attribute name is the host's node ID (strata.node.id).
-      nixosConfigurations.hv-01 = nixpkgs.lib.nixosSystem {
+      # Named after the node ID, which is also the hostname, so
+      # `nixos-rebuild --flake .` selects it on the host.
+      nixosConfigurations.${host.strata.node.id} = nixpkgs.lib.nixosSystem {
         modules = [
           strata.nixosModules.default
           ./hardware-configuration.nix
           ./configuration.nix
-        ];
+          ./host.nix
+        ]
+        # Optional site-specific module (`strata-install --extra-module`).
+        ++ nixpkgs.lib.optional (builtins.pathExists ./extra-module.nix) ./extra-module.nix;
       };
     };
 }

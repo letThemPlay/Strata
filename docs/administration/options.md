@@ -3,8 +3,9 @@
 Only options listed here are implemented and tested. Everything is
 **experimental** until the first release.
 
-The easiest start is the host template, which sets every option below and
-lists the values you must fill in:
+The easiest start is the installer ([installation](../installation/README.md)),
+which generates the host configuration from the host template. To start
+from the template by hand (machine-specific values go in `host.nix`):
 
 ```sh
 mkdir hv-01 && cd hv-01
@@ -64,7 +65,7 @@ Every `strata.<module>.enable` below requires `strata.enable`.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `strata.enable` | bool | `false` | Enable Strata on this host. Installs the Strata binaries and writes `/etc/strata/node.json`. |
+| `strata.enable` | bool | `false` | Enable Strata on this host. Installs the Strata binaries and writes `/etc/strata/node.json`, installs Git and enables Nix flakes (host configurations are flakes, ADR-0013). |
 | `strata.package` | package | flake's `strata` package | Package providing the binaries. Set automatically by `nixosModules.default`. |
 | `strata.node.id` | null or RFC 1123 label | `null` | Stable node identifier: lowercase letters, digits and `-`, 1–63 characters, not starting or ending with `-`. Required. Becomes the default `networking.hostName`. |
 | `strata.node.role` | `"hypervisor"` | `"hypervisor"` | Node role. No other roles exist yet. |
@@ -171,3 +172,4 @@ evaluation. systemd-boot keeps at most 10 generations
 - `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, libvirt, KVM).
 - `checks.<system>.reference-host`: builds the reference host (the `host` template plus test values).
 - `checks.x86_64-linux.nixos-install-ext4`: formats an empty disk with the `ext4` layout, installs the reference host and boots it under UEFI.
+- `checks.x86_64-linux.nixos-installer`: installs a host with the installer ISO, offline, and boots it.

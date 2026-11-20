@@ -88,21 +88,24 @@ today:
 | `cmd/strata-api` | Management API server (`version`/`help` only) |
 | `cmd/strata-agent` | Node agent: `run`, `discover` |
 | `cmd/strata-controller` | Control-plane controller (`version`/`help` only) |
+| `cmd/strata-install` | Host installer: `plan`, `apply` |
 | `internal/version` | Build metadata injected via `-ldflags` |
 | `internal/cli` | Shared, testable entrypoint and subcommand dispatch |
 | `internal/hardware` | Hardware discovery from procfs/sysfs (no exec) |
 | `internal/agent` | Agent run loop, atomic report writing, agent subcommands |
+| `internal/install` | Answer file, `host.nix` rendering, disk and NIC probing, installation steps |
 | `nix/packages/` | Package definitions (`strata`) |
 | `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring`, `disk` |
 | `nix/hosts/` | Test values completing the host template into the reference host |
 | `installer/partitioning/` | disko layouts used by `strata.disk` |
+| `installer/iso/` | Installer ISO (NixOS module) and the host `flake.lock` it ships |
 | `templates/host/` | Flake template for a host configuration repository |
 | `nix/tests/` | Nix evaluation tests and NixOS VM tests (`nixos/`) |
 | `examples/standalone/` | Non-normative sample infrastructure configuration |
-| `docs/` | Development and administration documentation |
+| `docs/` | Development, administration and installation documentation |
 | `.github/workflows/` | CI |
 
-Planned (not yet created): `installer/{iso,backend}` (M1),
+Planned (not yet created):
 `internal/{compute,storage,networking,...}` (M2+), `internal/{gitops,schema,
 planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 `internal/cluster` (M6).
@@ -122,7 +125,8 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | Agent systemd service (unprivileged, no network) | **Implemented** (M1 slice 1, experimental) |
 | NixOS options `strata.{compute,access,networking,monitoring}.*` (libvirt, key-only SSH, management network + nftables, node exporter) | **Implemented** (M1 slice 2, experimental) |
 | `strata.disk` (disko ext4 layout, systemd-boot, UEFI), host flake template, reference host | **Implemented** (M1 slice 3, experimental) |
-| Installer ISO and `strata-install` | Planned (M1 slice 4) |
+| Installer ISO and `strata-install plan/apply` (answer file, offline install) | **Implemented** (M1 slice 4a, experimental) |
+| `strata-install init` (interactive answer file wizard) | Planned (M1 slice 4b) |
 | Physical hardware validation | Planned (M1 slice 5) |
 | VM management (libvirt) | Planned (M2) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
@@ -145,8 +149,11 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
    single disk, UEFI, systemd-boot), the `host` flake template and the
    reference host built from it, installed and booted in a VM test.
    Mirrors, ZFS root and BIOS boot are deferred. **Done.**
-4. Installer ISO and `strata-install` (answer file or interactive prompts;
-   explicit confirmation before wiping a disk).
+4. Installer ISO and `strata-install`, in two parts:
+   - 4a: `plan`/`apply` driven by a JSON answer file; offline installation
+     from the ISO; typed confirmation before erasing the disk; the host flake
+     is stored in `/etc/nixos` as a Git repository. **Done.**
+   - 4b: `init`, an interactive wizard that writes the answer file.
 5. Installation guide and validation on physical Intel and AMD hardware.
 
 ## Architecture decision records
@@ -317,3 +324,57 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   (`nix/hosts/reference.nix`). CI builds it for every supported system, and
   evaluation tests check that the unfilled template fails on exactly the
   three missing values.
+- **Update (M1 slice 4a):** machine-specific values (node ID, admin keys,
+  install disk, management interface and addressing) moved from
+  `configuration.nix` to `host.nix`, a plain attribute set that
+  `strata-install` generates. `flake.nix` names the configuration after
+  `strata.node.id` read from `host.nix`, so `nixos-rebuild --flake .` finds
+  it by hostname. Strata hosts enable flakes and include Git.
+
+### ADR-0014: Offline installer that builds before it erases
+
+- **Context:** M1 must install Strata on physical hardware (ADR-0009: CLI
+  installer, answer file, disko).
+- **Decision:**
+  - `strata-install` reads a strict, versioned JSON answer file
+    (`install.strata.dev/v1alpha1`; unknown fields are errors). It generates
+    the host flake from `templates/host`: template files are copied
+    unchanged, `host.nix` is rendered from validated answers with every
+    value emitted as an escaped Nix string literal (no answer file content
+    can become Nix code), and `hardware-configuration.nix` comes from
+    `nixos-generate-config --no-filesystems`.
+  - **Build before erase:** the system and its disko formatting script are
+    built first. Only then does the installer ask the operator to type the
+    disk's device path (or accept `--confirm-wipe DEVICE`, which must match
+    exactly) and run anything that writes to the disk. A configuration that
+    does not evaluate or build never costs a disk.
+  - **Offline:** the ISO carries the Strata, nixpkgs and disko sources, the
+    reference host's closure and the tools to build per-machine derivations;
+    Nix substituters are disabled. The host `flake.lock`
+    (`installer/iso/host-lock.nix`) pins Strata to the ISO's source by
+    `narHash` (revision too, for clean builds) and reuses Strata's own lock
+    for everything else, so the installed host runs exactly what the ISO
+    tested and Nix resolves every input from the local store.
+  - The host flake is stored in `/etc/nixos` as a Git repository with one
+    commit, and its inputs are copied into the installed system's store.
+    The operator pushes it to their own repository; the installer holds no
+    Git credentials.
+  - External programs (`nix`, `nixos-install`, `git`, the disko script) are
+    run with explicit arguments and timeouts, never through a shell.
+- **Testing:** unit tests use a fake command runner and filesystem fixtures,
+  including the rule that nothing destructive runs before a successful build
+  and a confirmation. The `nixos-installer` VM test boots the real ISO image
+  (a test variant) under UEFI with no outside network, checks that a
+  mismatched confirmation leaves the disk blank, installs, then boots the
+  disk alone and checks that `/etc/nixos` evaluates offline to exactly the
+  running system. `--extra-module` (a site-specific NixOS module copied into
+  the host flake) is how the test adds the test driver's instrumentation.
+- **Consequences:** the ISO is large (it carries a host's closure plus build
+  tools). The offline build-tool list is maintained by the VM test: a
+  missing tool fails it. The test must vary every per-host value: for
+  example, the nftables ruleset is checked at build time in an `lkl`
+  sandbox, which is only needed once the management interface differs from
+  the reference host's. ISOs built from a dirty tree pin a placeholder
+  revision (the `narHash` still pins the source); such hosts need
+  `nix flake update` before fetching from GitHub. Only x86_64 ISOs are
+  tested.

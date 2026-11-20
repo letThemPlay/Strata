@@ -1,11 +1,7 @@
-# Strata host configuration.
+# Strata host configuration: the policy shared by Strata hosts.
 #
-# Three values must be filled in before this configuration evaluates; until
-# then, evaluation fails with an assertion naming the missing option:
-#
-#   - strata.access.admin.authorizedKeys    your SSH public key(s)
-#   - strata.disk.device                    the disk to install on
-#   - strata.networking.management.interface the management NIC
+# Machine-specific values (node ID, admin keys, install disk, management
+# interface and addressing) live in host.nix.
 #
 # See docs/administration/options.md in the Strata repository for every
 # option.
@@ -13,43 +9,22 @@
   strata = {
     enable = true;
 
-    node.id = "hv-01";
-
     agent.enable = true;
 
     # libvirt with KVM-accelerated, unprivileged QEMU.
     compute.enable = true;
 
     # Key-only SSH for the admin account, which has passwordless sudo.
-    # Anyone holding one of these keys is effectively root on the host.
-    access = {
-      enable = true;
-      admin.authorizedKeys = [
-        # "ssh-ed25519 AAAA... admin@workstation"
-      ];
-    };
+    access.enable = true;
 
-    # Formatting this disk destroys all data on it. Use a /dev/disk/by-id/
-    # path (`ls -l /dev/disk/by-id/`).
+    # System disk layout and boot loader (the disk is set in host.nix).
     disk = {
       enable = true;
-      # device = "/dev/disk/by-id/nvme-...";
       layout = "ext4";
     };
 
-    # SSH and the node exporter are reachable only through this interface.
-    networking = {
-      enable = true;
-      management = {
-        # interface = "eno1"; # see `ip link`
-        addressing = "dhcp";
-        # For static addressing instead:
-        # addressing = "static";
-        # addresses = [ "192.0.2.10/24" ];
-        # gateway4 = "192.0.2.1";
-        # dns = [ "192.0.2.53" ];
-      };
-    };
+    # Management interface and firewall (the interface is set in host.nix).
+    networking.enable = true;
 
     monitoring.enable = true;
   };

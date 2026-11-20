@@ -96,6 +96,7 @@ let
   templateModules = [
     ../../templates/host/hardware-configuration.nix
     ../../templates/host/configuration.nix
+    ../../templates/host/host.nix
   ];
   # Option value evaluation throws on type errors.
   rejects = sys: path: throws (lib.attrByPath path null sys.config);
@@ -363,9 +364,28 @@ let
       && mentions "management.interface";
     "reference host has no failed assertions" =
       failedAssertions (eval (templateModules ++ [ ../hosts/reference.nix ])) == [ ];
+    # strata-install output (Go golden files) is a valid host.nix.
+    "installer-generated host.nix files evaluate" =
+      lib.all
+        (
+          golden:
+          failedAssertions (eval [
+            ../../templates/host/hardware-configuration.nix
+            ../../templates/host/configuration.nix
+            golden
+          ]) == [ ]
+        )
+        [
+          ../../internal/install/testdata/host-static.nix
+          ../../internal/install/testdata/host-dhcp.nix
+        ];
 
     # ---- base and agent ----
     "valid config has no failed assertions" = failedAssertions valid == [ ];
+    "strata enables flakes" = lib.all (f: lib.elem f valid.config.nix.settings.experimental-features) [
+      "nix-command"
+      "flakes"
+    ];
     "node.id becomes the hostname" = valid.config.networking.hostName == "hv-01";
     "node.json contains identity" =
       builtins.fromJSON valid.config.environment.etc."strata/node.json".text == {

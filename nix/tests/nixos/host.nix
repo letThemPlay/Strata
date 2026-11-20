@@ -9,7 +9,7 @@
 # node names: admin=1, hv01=2, outsider=3.
 { self, pkgs }:
 let
-  keys = import "${pkgs.path}/nixos/tests/ssh-keys.nix" pkgs;
+  keys = import (pkgs.path + "/nixos/tests/ssh-keys.nix") pkgs;
 in
 pkgs.testers.runNixOSTest {
   name = "strata-host";

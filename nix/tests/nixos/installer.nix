@@ -175,6 +175,9 @@ pkgs.testers.runNixOSTest {
         assert store.startswith("/dev/vda2"), store
         print(installed.execute("findmnt -t 9p,virtiofs")[1])
         installed.succeed("bootctl is-installed")
+        # Redistributable firmware is installed, as on physical machines
+        # (see installed-test-module.nix).
+        installed.succeed("test -n \"$(ls /run/current-system/firmware/)\"")
 
     with subtest("Strata host services run"):
         for unit in ["strata-agent.service", "sshd.service", "libvirtd.service",

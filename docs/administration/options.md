@@ -86,6 +86,11 @@ KVM modules are not configured: udev loads `kvm-intel` or `kvm-amd` from the
 CPU's features. libvirt's built-in `default` NAT network is defined by NixOS
 but never started; guest networking will be managed by Strata (M2).
 
+> **Subject to change.** The workload backend (libvirt, or Incus for both VMs
+> and containers) is still being decided before M2; what `strata.compute`
+> enables may change with it. See
+> [ADR-0015](../../ARCHITECTURE.md#adr-0015-workload-backend-under-evaluation-incus).
+
 ## Access
 
 | Option | Type | Default | Description |

@@ -25,8 +25,10 @@ Optional: with direnv, create an untracked `.envrc` containing `use flake`.
 | `make fmt-check` | Fail if anything is unformatted |
 | `make lint` | golangci-lint, statix, deadnix |
 | `make build` | Build binaries into `./bin` with version metadata |
-| `make nix-check` | `nix flake check` |
-| `make check` | All of the above checks |
+| `make nix-check` | `nix flake check`: every check, including the VM tests |
+| `make nix-check-novm` | Evaluates every check and builds all but the VM tests (what CI runs) |
+| `make vm-test` | Runs only the NixOS VM tests (`checks.<system>.nixos-*`; needs KVM) |
+| `make check` | Format, lint, Go tests and `nix flake check` |
 
 ## What `nix flake check` runs
 
@@ -61,13 +63,22 @@ Nix flakes only see files tracked by Git. Run `git add` on new files before
 
 ## CI
 
-`.github/workflows/ci.yml` runs `nix flake check`, then format check, lint,
-tests and race-detector tests inside the development shell.
+`.github/workflows/ci.yml` runs `make nix-check-novm`, then format check,
+lint, tests and race-detector tests inside the development shell.
+
+**CI does not run the NixOS VM tests** (ADR-0016). It evaluates them, so a
+broken test definition still fails CI, but it does not boot them. Run them
+locally before you push a change to the Nix modules, the installer, the ISO
+or the tests, and say in the pull request that they passed:
+
+```sh
+make vm-test       # or: make nix-check (everything)
+```
 
 ## NixOS VM tests
 
-VM tests live in `nix/tests/nixos/` and run as part of `nix flake check`.
-They need KVM (`/dev/kvm` and the `kvm`/`nixos-test` Nix system features).
+VM tests live in `nix/tests/nixos/` and run as part of `nix flake check`
+and `make vm-test`, locally only. They need KVM (`/dev/kvm` and the `kvm`/`nixos-test` Nix system features).
 To debug one interactively:
 
 ```sh

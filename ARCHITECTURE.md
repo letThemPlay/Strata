@@ -118,7 +118,7 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | Go module and four binaries | **Implemented** (only the agent has functional commands) |
 | Formatting (gofumpt, goimports, nixfmt) and linting (golangci-lint, statix, deadnix) | **Implemented** |
 | Go unit tests, Nix evaluation tests, NixOS VM tests (including install-and-boot) | **Implemented** |
-| GitHub Actions CI (including VM tests via KVM) | **Implemented** |
+| GitHub Actions CI (all checks evaluated, non-VM checks built; VM tests run locally, ADR-0016) | **Implemented** |
 | Sample infrastructure configuration | **Example only** — no schema, not consumed by any code |
 | NixOS options `strata.{enable,package,node.id,node.role,agent.enable}` | **Implemented** (M1 slice 1, experimental) — see [options](docs/administration/options.md) |
 | Hardware discovery (`strata-agent discover`, `/var/lib/strata/hardware.json`) | **Implemented** (M1 slice 1, experimental; schema `v1alpha1`) |
@@ -127,10 +127,10 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | `strata.disk` (disko ext4 layout, systemd-boot, UEFI), host flake template, reference host | **Implemented** (M1 slice 3, experimental) |
 | Installer ISO and `strata-install plan/apply` (answer file, offline install) | **Implemented** (M1 slice 4a, experimental) |
 | `strata-install init` (interactive answer file wizard) | **Implemented** (M1 slice 4b, experimental) |
-| Physical hardware validation | Planned (M1 slice 5) |
-| VM management (libvirt) | Planned (M2) |
+| Physical hardware validation | **Pending** (M1 slice 5): [procedure](docs/installation/hardware-validation.md) ready, not yet run |
+| VM management | Planned (M2); workload backend under evaluation (libvirt/LXC/Podman or Incus, [ADR-0015](#adr-0015-workload-backend-under-evaluation-incus)) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
-| LXC, Podman, ZFS, LVM | Planned (M4) |
+| Containers (LXC, OCI), ZFS, LVM | Planned (M4); backend under evaluation ([ADR-0015](#adr-0015-workload-backend-under-evaluation-incus)) |
 | REST API, auth, dashboard | Planned (M5) |
 | Clustering | Planned (M6) |
 | Ceph, backup, HA | Planned (M7) |
@@ -156,6 +156,39 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
    - 4b: `init`, an interactive wizard that writes the answer file, checks
      it like `plan` and offers to install. **Done.**
 5. Installation guide and validation on physical Intel and AMD hardware.
+   Virtualization is validated at the host level (`/dev/kvm`, the hardware
+   report), not by managing workloads (ADR-0015). The guide and the
+   [validation procedure](docs/installation/hardware-validation.md) are
+   written; the `nixos-installer` test builds what a physical install builds
+   (redistributable firmware, microcode). **Pending: running the procedure
+   on physical machines.**
+
+### M1 status
+
+Everything except the acceptance run on physical hardware is done and
+passes in VMs. **M1 is not accepted until the
+[hardware validation](docs/installation/hardware-validation.md) passes on
+at least one Intel and one AMD machine.** No workload management (libvirt,
+LXC, Podman, Incus) exists: the agent and the Go code contain none, and on
+a host libvirtd runs as a host service only, unused by Strata.
+
+Known limitations at the end of M1:
+
+- **Not validated on physical hardware** (see above).
+- One system disk layout: ext4 on a single disk, UEFI only, systemd-boot,
+  no mirroring, no swap, no Secure Boot.
+- Management network: one interface, static or DHCP; no VLAN or bond.
+  Disruptive network changes are not rolled back automatically (ADR-0011).
+- Access: one admin account, SSH keys only; its key is root-equivalent
+  (ADR-0010).
+- The installer is x86_64 only and large (it carries a host closure and
+  build tools; ADR-0014). Hosts are pinned to the ISO's Strata and nixpkgs
+  revisions until updated with `nix flake update`.
+- The agent only discovers hardware; it has no API and no network access
+  (ADR-0007).
+- `strata.compute` enables libvirtd although no workloads are managed; it
+  may change with the workload backend decision (ADR-0015).
+- `strata`, `strata-api` and `strata-controller` are placeholders.
 
 ## Architecture decision records
 
@@ -228,6 +261,8 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   root only. Remote access to the agent arrives with authentication (M5).
 - **Update (M1 slice 2):** the agent still has no libvirt access. Nothing in
   the agent uses libvirt yet; access is added with the M2 libvirt provider.
+- **Update (ADR-0015):** which workload backend the agent talks to in M2 is
+  open (libvirt or Incus). The privilege rule stands either way.
 
 ### ADR-0008: Versioned hardware report
 
@@ -277,6 +312,7 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   not autostart it. Strata leaves it inactive; the VM test asserts that no
   libvirt network is active or autostarted and that `virbr0` does not exist.
   Guest networking is provided by Strata network providers (M2).
+  This paragraph is libvirt-specific and is revisited with ADR-0015.
 - **Known limitation:** disruptive network changes are not rolled back
   automatically yet. Recovery relies on NixOS generations (`nixos-rebuild
   test`, boot-menu rollback) and console access. Automatic rollback belongs to
@@ -298,8 +334,9 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   script and the installed system's `fileSystems`, so they cannot drift. The
   smallest layout that boots on current server hardware comes first; every
   additional layout needs its own install-and-boot test.
-- **Consequences:** VM disks under `/var/lib/libvirt` live on the root
-  filesystem until storage pools arrive (M4, on additional disks).
+- **Consequences:** the system disk holds the operating system only.
+  Workload storage is kept off the system disk: it will live in explicitly
+  configured pools on separate disks, with allocation policies (ADR-0015).
   Reinstalling formats the whole system disk, including those VM disks.
   No swap partition is created. Mirrored system disks, ZFS root and legacy
   BIOS boot are not supported yet. The `nixos-install-ext4` VM test installs
@@ -322,7 +359,8 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   synchronizes from (CLAUDE.md §8). The installer (M1 slice 4) fills in the
   same three values plus a generated `hardware-configuration.nix`.
 - **Testing:** `nixosConfigurations.reference` is the template plus test values
-  (`nix/hosts/reference.nix`). CI builds it for every supported system, and
+  (`nix/hosts/reference.nix`). It is built for the CI system and evaluated
+  for every supported system, and
   evaluation tests check that the unfilled template fails on exactly the
   three missing values.
 - **Update (M1 slice 4a):** machine-specific values (node ID, admin keys,
@@ -391,7 +429,102 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
   missing tool fails it. The test must vary every per-host value: for
   example, the nftables ruleset is checked at build time in an `lkl`
   sandbox, which is only needed once the management interface differs from
-  the reference host's. ISOs built from a dirty tree pin a placeholder
-  revision (the `narHash` still pins the source); such hosts need
-  `nix flake update` before fetching from GitHub. Only x86_64 ISOs are
-  tested.
+  the reference host's. Build-time-only inputs are in no runtime closure
+  and must be listed explicitly: CPU microcode, which is prepended to the
+  initrd, is only enabled by `nixos-generate-config` on physical machines,
+  so the test's extra module enables redistributable firmware and both
+  vendors' microcode as a physical install does. ISOs built from a dirty
+  tree pin a placeholder revision (the `narHash` still pins the source);
+  such hosts need `nix flake update` before fetching from GitHub. Only
+  x86_64 ISOs are tested.
+
+### ADR-0015: Workload backend under evaluation (Incus)
+
+- **Status:** open; Incus adoption is not approved. The formal decision,
+  together with updates to CLAUDE.md, this document and the affected ADRs,
+  is made after M1 and before M2 starts.
+- **Context:** CLAUDE.md specifies three independent workload providers:
+  libvirt for VMs, LXC for system containers and Podman for OCI containers.
+  Incus is being evaluated as the primary backend for both VMs and
+  containers instead. Incus manages QEMU/KVM VMs and LXC containers itself,
+  can run OCI images as containers, and has its own REST API, storage pools,
+  networks, projects and clustering.
+- **Interim decision (rest of M1):**
+  - No direct libvirt workload management and no independent LXC or Podman
+    providers are implemented.
+  - Nothing new assumes that Strata manages VM or container lifecycles
+    directly.
+  - Host-level work (NixOS modules, hardware discovery, installation, host
+    networking, disk and storage preparation) stays independent of the
+    workload backend. The agent stays backend-agnostic where practical: it
+    has no libvirt access and no workload code.
+  - Existing code is not restructured and no Incus integration is added
+    until the architecture is reviewed and approved.
+  - libvirtd and its tests stay, as a host-level service only: `strata.compute`
+    enables it, nothing in Strata manages workloads through it, and the
+    agent has no access to it.
+  - No etcd and no Incus clustering changes.
+  - **Workload storage is separate from the system disk** (decided): it will
+    use explicitly configured pools on separate disks with allocation
+    policies, whichever backend is chosen. The system disk layout
+    (ADR-0012) holds the operating system only.
+- **Security design issue for the review: agent access to the Incus API.**
+  Access to the Incus Unix socket is equivalent to root on the host (it can
+  create privileged instances and attach host devices and paths). Granting
+  the agent unrestricted access to it is **not** an accepted solution. The
+  review must decide how the agent is restricted, for example: a dedicated
+  Incus project with restricted settings (no privileged instances, no host
+  device or path passthrough, limits), a TLS client identity confined to
+  that project instead of the root socket, or a separate privileged helper
+  that exposes only the operations Strata plans and audits. Until then the
+  agent has no access to any workload backend.
+- **Already backend-independent:** the `strata.{enable,node,agent,access,
+  networking,monitoring,disk}` modules, the hardware report
+  (`hardware.strata.dev/v1alpha1`), the agent, the installer and answer file,
+  the host flake template and the offline ISO. Incus on NixOS requires the
+  nftables firewall, which Strata already uses (ADR-0011).
+- **Decisions to revisit if Incus is adopted:**
+  - **CLAUDE.md** (technology stack, §10 workload providers, the libvirt
+    rule in §3, etcd for cluster coordination in §16, the `/lxc` and `/oci`
+    API resources): the specification must be revised first; it is the
+    authority for these choices.
+  - **`strata.compute`** enables libvirtd with unprivileged QEMU and swtpm.
+    The module would enable Incus instead, or select a backend; its option
+    name and documentation describe a libvirt host today. The checks that
+    assert libvirtd (`module-eval`, `nixos-host`, `nixos-install-ext4`,
+    `nixos-installer`) change with it.
+  - **ADR-0007:** how the agent gets restricted access to the Incus API (see
+    the security design issue above), instead of libvirt access.
+  - **ADR-0011:** the libvirt NAT network paragraph; Incus bridges, its own
+    nftables rules and, if enabled, its HTTPS API port on the management
+    interface need the same interface-scoped firewall treatment.
+  - **M4 storage:** whether workload volumes are Incus storage pools
+    (LVM, ZFS, ...) or Strata-managed volumes. Either way they live on
+    separate disks with explicit pool configuration (decided above).
+  - **M3 IR and reconciler:** whether Strata plans against its own provider
+    interfaces or translates the IR into Incus resources (instances,
+    profiles, projects) and lets Incus manage lifecycles.
+  - **M6 clustering:** Incus has built-in clustering; CLAUDE.md plans etcd
+    and a central controller.
+  - **M5 authentication and RBAC:** relationship to Incus's own TLS client
+    certificates, projects and authorization.
+  - **README and ARCHITECTURE.md overview** (diagram and summary name
+    libvirt, LXC and Podman).
+
+### ADR-0016: NixOS VM tests run locally, not in CI
+
+- **Context:** the NixOS VM tests (`checks.<system>.nixos-*`) boot up to
+  three guests each and, for the installer, build an ISO image. On GitHub's
+  shared 4-CPU runners they ran slowly and, run concurrently, starved the
+  runner until guests took minutes to boot and runs stalled until the job
+  timeout. They are deterministic and pass locally.
+- **Decision:** CI evaluates every check for every system and builds every
+  check except the VM tests (`make nix-check-novm`), then runs the format,
+  lint and Go test targets. The VM tests run locally, with `make vm-test`
+  or `make nix-check`, on a machine with KVM.
+- **Consequences:** a regression that only a VM test detects is not caught
+  by CI. Contributors run `make vm-test` before pushing changes to the Nix
+  modules, the installer, the ISO or the tests, and state in the pull
+  request that it passed. A broken test definition still fails CI, because
+  the tests are evaluated. This can be revisited with dedicated runners
+  that have KVM and enough CPU and memory.

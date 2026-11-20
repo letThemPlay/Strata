@@ -16,28 +16,20 @@ jobs:
   check:
     name: nix flake check
     runs-on: ubuntu-latest
-    # The installer test builds an ISO and installs a host in VMs.
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-
-      # NixOS VM tests (checks.*.nixos-*) need KVM. GitHub's Linux runners
-      # expose /dev/kvm but only to root by default.
-      - name: Enable KVM
-        run: |
-          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
-            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
-          sudo udevadm control --reload-rules
-          sudo udevadm trigger --name-match=kvm
 
       - uses: cachix/install-nix-action@v31
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
-            system-features = nixos-test benchmark big-parallel kvm
 
-      - name: nix flake check
-        run: nix flake check --print-build-logs
+      # Every check is evaluated and every non-VM check is built. The NixOS
+      # VM tests (checks.*.nixos-*) run locally only (`make vm-test`,
+      # ADR-0016): on the shared runners they were slow and stalled.
+      - name: Nix checks (without VM tests)
+        run: nix develop --command make nix-check-novm
 
       - name: Format check
         run: nix develop --command make fmt-check

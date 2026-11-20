@@ -110,6 +110,16 @@ in
     systemd.out
     texinfo
   ])
+  # CPU microcode is prepended to the initrd at build time, so it is not in
+  # any system's runtime closure; nixos-generate-config enables it for the
+  # detected vendor on physical machines.
+  ++ lib.optionals pkgs.stdenv.hostPlatform.isx86 (
+    with pkgs;
+    [
+      microcode-intel
+      microcode-amd
+    ]
+  )
   # networking.nftables.checkRuleset validates the ruleset at build time in
   # a Linux Kernel Library sandbox (nixos/modules/services/networking/nftables.nix).
   ++ (with pkgs.buildPackages; [

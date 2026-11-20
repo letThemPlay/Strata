@@ -20,8 +20,10 @@ Defined in [`installer/partitioning/ext4.nix`](../../installer/partitioning/ext4
   generations on the ESP.
 - **Single disk.** No mirroring (RAID1) of the system disk yet.
 - **No swap partition.**
-- **VM data.** Until storage pools arrive (M4), libvirt stores VM disks under
-  `/var/lib/libvirt` on the root filesystem.
+- **No workload storage.** The system disk holds the operating system only.
+  Workload storage (VM disks, container volumes) will live in explicitly
+  configured pools on separate disks, with allocation policies, never on the
+  system disk (ADR-0012, ADR-0015). Strata does not manage workloads yet.
 
 ## Choosing the device
 
@@ -37,6 +39,5 @@ filesystems by GPT partition label, so the device path is only used when
 formatting.
 
 > **Warning:** formatting destroys every partition and all data on the
-> selected disk, including VM disks stored under `/var/lib/libvirt` by a
-> previous installation. Strata never formats a disk implicitly;
+> selected disk. Strata never formats a disk implicitly;
 > `strata-install` requires you to type the device path first.

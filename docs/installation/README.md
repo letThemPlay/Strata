@@ -2,11 +2,14 @@
 
 **Status:** experimental (M1 slice 4). The installer is tested end to end
 in a VM (`checks.x86_64-linux.nixos-installer`); installation on physical
-hardware has not been validated yet (M1 slice 5).
+hardware has not been validated yet. The procedure for that is in
+[hardware validation](hardware-validation.md).
 
 ## Requirements
 
-- An x86_64 machine that boots in **UEFI** mode (no legacy BIOS).
+- An x86_64 machine that boots in **UEFI** mode (no legacy BIOS), with
+  **Secure Boot disabled** (the installer and systemd-boot are not signed)
+  and **Intel VT-x or AMD-V** enabled in the firmware settings.
 - A system disk of at least 16 GiB. **It will be erased completely.**
 - A network interface for management. No network access is needed during
   installation: everything is on the ISO.

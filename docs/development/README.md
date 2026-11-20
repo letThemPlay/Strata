@@ -43,6 +43,8 @@ Optional: with direnv, create an untracked `.envrc` containing `use flake`.
 | `nixos-host` | NixOS VM test with three nodes: admin SSH and sudo, refused password/root logins, firewall isolation of the management services, node exporter, libvirt, KVM (needs KVM) |
 | `reference-host` | Builds the reference host: the `host` template plus `nix/hosts/reference.nix` |
 | `nixos-install-ext4` | x86_64 only. Formats an empty disk with the `ext4` layout, installs the reference host and boots it with UEFI firmware, twice (needs KVM) |
+| `installer-system` | Builds the installer ISO's NixOS system (the image itself: `nix build .#iso`) |
+| `nixos-installer` | x86_64 only. Boots the installer ISO (test variant) under UEFI with no outside network, checks `plan`, a refused confirmation, and `apply`; then boots the installed disk alone and checks services and that `/etc/nixos` reproduces the running system (needs KVM; the slowest check) |
 
 Nix flakes only see files tracked by Git. Run `git add` on new files before
 `nix flake check` or `nix build`, otherwise they are silently ignored.

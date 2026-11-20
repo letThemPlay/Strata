@@ -1,0 +1,197 @@
+// Package install implements strata-install, the Strata host installer.
+//
+// The installer reads a versioned answer file, generates a host
+// configuration flake from the template shipped on the installer ISO,
+// builds the system offline, and only then, after explicit confirmation,
+// formats the target disk and installs. See ADR-0014.
+package install
+
+import (
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/netip"
+	"regexp"
+	"slices"
+	"strings"
+)
+
+// APIVersion identifies the answer file schema.
+const APIVersion = "install.strata.dev/v1alpha1"
+
+// Defaults applied by Parse for optional fields.
+const (
+	DefaultAdminName = "strata-admin"
+	DefaultLayout    = "ext4"
+)
+
+// Answers is the content of an answer file.
+type Answers struct {
+	APIVersion string  `json:"apiVersion"`
+	Node       Node    `json:"node"`
+	Admin      Admin   `json:"admin"`
+	Disk       Disk    `json:"disk"`
+	Network    Network `json:"network"`
+}
+
+// Node identifies the host (strata.node).
+type Node struct {
+	// ID becomes strata.node.id and the hostname.
+	ID string `json:"id"`
+}
+
+// Admin configures the administrator account (strata.access.admin).
+type Admin struct {
+	// Name of the admin account. Defaults to DefaultAdminName.
+	Name string `json:"name,omitempty"`
+	// AuthorizedKeys are the OpenSSH public keys allowed to log in.
+	AuthorizedKeys []string `json:"authorizedKeys"`
+}
+
+// Disk selects the system disk (strata.disk).
+type Disk struct {
+	// Device is the disk to format, preferably under /dev/disk/by-id/.
+	Device string `json:"device"`
+	// Layout is the partition layout. Defaults to DefaultLayout.
+	Layout string `json:"layout,omitempty"`
+}
+
+// Network configures the management interface
+// (strata.networking.management).
+type Network struct {
+	Interface  string   `json:"interface"`
+	Addressing string   `json:"addressing"`
+	Addresses  []string `json:"addresses,omitempty"`
+	Gateway4   string   `json:"gateway4,omitempty"`
+	Gateway6   string   `json:"gateway6,omitempty"`
+	DNS        []string `json:"dns,omitempty"`
+}
+
+// Validation patterns. They match the NixOS option types of the Strata
+// modules; where those are looser (device paths, key comments), the
+// installer is stricter, so that every accepted value is also safe to
+// write into a Nix string.
+var (
+	nodeIDPattern    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	userNamePattern  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	sshKeyPattern    = regexp.MustCompile(`^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+=*( [^\x00-\x1f\x7f]*)?$`)
+	devicePattern    = regexp.MustCompile(`^/dev/[A-Za-z0-9._:+@/-]+$`)
+	interfacePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
+)
+
+// layouts lists the supported disk layouts (installer/partitioning).
+func layouts() []string { return []string{"ext4"} }
+
+// Parse decodes and validates an answer file. Unknown fields, trailing
+// data and an unexpected apiVersion are errors. Defaults are filled in.
+func Parse(r io.Reader) (Answers, error) {
+	dec := json.NewDecoder(r)
+	dec.DisallowUnknownFields()
+
+	var a Answers
+	if err := dec.Decode(&a); err != nil {
+		return Answers{}, fmt.Errorf("answer file: %w", err)
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		return Answers{}, errors.New("answer file: unexpected data after the JSON object")
+	}
+
+	if a.Admin.Name == "" {
+		a.Admin.Name = DefaultAdminName
+	}
+	if a.Disk.Layout == "" {
+		a.Disk.Layout = DefaultLayout
+	}
+	if err := a.Validate(); err != nil {
+		return Answers{}, err
+	}
+	return a, nil
+}
+
+// Validate reports every problem in a, not just the first.
+func (a Answers) Validate() error {
+	var errs []error
+	add := func(field, format string, args ...any) {
+		errs = append(errs, fmt.Errorf("%s: %s", field, fmt.Sprintf(format, args...)))
+	}
+
+	if a.APIVersion != APIVersion {
+		add("apiVersion", "must be %q, got %q", APIVersion, a.APIVersion)
+	}
+
+	if !nodeIDPattern.MatchString(a.Node.ID) {
+		add("node.id", "%q is not a valid node ID (lowercase letters, digits and '-', 1-63 characters, not starting or ending with '-')", a.Node.ID)
+	}
+
+	switch {
+	case !userNamePattern.MatchString(a.Admin.Name):
+		add("admin.name", "%q is not a valid user name", a.Admin.Name)
+	case a.Admin.Name == "root":
+		add("admin.name", "must not be root (root login is disabled)")
+	}
+	if len(a.Admin.AuthorizedKeys) == 0 {
+		add("admin.authorizedKeys", "at least one key is required, otherwise nobody can log in")
+	}
+	for i, k := range a.Admin.AuthorizedKeys {
+		if !sshKeyPattern.MatchString(k) {
+			add(fmt.Sprintf("admin.authorizedKeys[%d]", i), "not a supported OpenSSH public key (one line: type, base64 key, optional comment)")
+		}
+	}
+
+	if !devicePattern.MatchString(a.Disk.Device) || strings.Contains(a.Disk.Device, "/../") {
+		add("disk.device", "%q is not a device path under /dev/", a.Disk.Device)
+	}
+	if !slices.Contains(layouts(), a.Disk.Layout) {
+		add("disk.layout", "unknown layout %q (supported: %s)", a.Disk.Layout, strings.Join(layouts(), ", "))
+	}
+
+	errs = append(errs, a.Network.validate()...)
+	return errors.Join(errs...)
+}
+
+func (n Network) validate() []error {
+	var errs []error
+	add := func(field, format string, args ...any) {
+		errs = append(errs, fmt.Errorf("network.%s: %s", field, fmt.Sprintf(format, args...)))
+	}
+
+	if !interfacePattern.MatchString(n.Interface) {
+		add("interface", "%q is not a valid interface name", n.Interface)
+	}
+
+	switch n.Addressing {
+	case "static":
+		if len(n.Addresses) == 0 {
+			add("addresses", "at least one address is required with static addressing")
+		}
+	case "dhcp":
+		if len(n.Addresses) > 0 || n.Gateway4 != "" || n.Gateway6 != "" || len(n.DNS) > 0 {
+			add("addressing", "addresses, gateways and dns are only allowed with static addressing")
+		}
+	default:
+		add("addressing", "must be \"static\" or \"dhcp\", got %q", n.Addressing)
+	}
+
+	for i, s := range n.Addresses {
+		if p, err := netip.ParsePrefix(s); err != nil || p.Addr().Zone() != "" {
+			add(fmt.Sprintf("addresses[%d]", i), "%q is not an address with prefix length (e.g. 192.0.2.10/24)", s)
+		}
+	}
+	if n.Gateway4 != "" {
+		if a, err := netip.ParseAddr(n.Gateway4); err != nil || !a.Is4() {
+			add("gateway4", "%q is not an IPv4 address", n.Gateway4)
+		}
+	}
+	if n.Gateway6 != "" {
+		if a, err := netip.ParseAddr(n.Gateway6); err != nil || !a.Is6() || a.Is4In6() || a.Zone() != "" {
+			add("gateway6", "%q is not an IPv6 address", n.Gateway6)
+		}
+	}
+	for i, s := range n.DNS {
+		if a, err := netip.ParseAddr(s); err != nil || a.Zone() != "" {
+			add(fmt.Sprintf("dns[%d]", i), "%q is not an IP address", s)
+		}
+	}
+	return errs
+}

@@ -31,13 +31,15 @@
       version = "0.1.0-dev";
       commit = self.shortRev or self.dirtyShortRev or "unknown";
 
-      # Only Go sources and module files affect the Go build.
+      # Only Go sources, module files and test data affect the Go build.
       goSrc = lib.fileset.toSource {
         root = ./.;
         fileset = lib.fileset.unions [
           ./go.mod
           (lib.fileset.fileFilter (file: file.hasExt "go") ./cmd)
           (lib.fileset.fileFilter (file: file.hasExt "go") ./internal)
+          # Golden files used by Go tests.
+          ./internal/install/testdata
         ];
       };
 
@@ -68,6 +70,20 @@
             { nixpkgs.hostPlatform = system; }
           ];
         };
+
+      # The installer ISO's NixOS system (installer/iso).
+      mkInstaller =
+        system: extraModules:
+        nixpkgs.lib.nixosSystem {
+          modules = [
+            (import ./installer/iso {
+              inherit self nixpkgs disko;
+              referenceHost = mkReferenceHost system;
+            })
+            { nixpkgs.hostPlatform = system; }
+          ]
+          ++ extraModules;
+        };
     in
     {
       packages = forAllSystems (pkgs: {
@@ -77,6 +93,9 @@
         };
 
         default = self.packages.${pkgs.stdenv.hostPlatform.system}.strata;
+
+        # Installer ISO image: nix build .#iso
+        iso = (mkInstaller pkgs.stdenv.hostPlatform.system [ ]).config.system.build.isoImage;
       });
 
       nixosModules = {
@@ -218,6 +237,10 @@
 
           # The reference host builds for every supported system.
           reference-host = (mkReferenceHost system).config.system.build.toplevel;
+
+          # The installer ISO's system (the image itself is built by the
+          # nixos-installer test, in a test variant).
+          installer-system = (mkInstaller system [ ]).config.system.build.toplevel;
         }
         # Partition an empty disk, install the reference host and boot it.
         # x86_64 only: disko's UEFI install tests do not boot on aarch64.
@@ -228,6 +251,11 @@
               disko
               mkReferenceHost
               ;
+          };
+
+          # Boot the installer ISO, install a host offline and boot it.
+          nixos-installer = import ./nix/tests/nixos/installer.nix {
+            inherit pkgs mkInstaller mkReferenceHost;
           };
         }
       );

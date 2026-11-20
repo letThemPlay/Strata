@@ -19,6 +19,7 @@ buildGoModule {
     "cmd/strata-api"
     "cmd/strata-agent"
     "cmd/strata-controller"
+    "cmd/strata-install"
   ];
 
   env.CGO_ENABLED = "0";

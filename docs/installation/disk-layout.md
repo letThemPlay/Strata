@@ -1,10 +1,9 @@
 # System disk layout
 
-**Status:** experimental (M1 slice 3). The installer that applies this
-layout (`strata-install`, M1 slice 4) does not exist yet. The layout is
-tested by installing and booting the reference host in a VM
-(`checks.x86_64-linux.nixos-install-ext4`); it has not been validated on
-physical hardware yet (M1 slice 5).
+**Status:** experimental. `strata-install` applies this layout
+([installation](README.md)). It is tested by installing and booting hosts
+in VMs (`checks.x86_64-linux.nixos-install-ext4`, `nixos-installer`); it
+has not been validated on physical hardware yet (M1 slice 5).
 
 ## The `ext4` layout
 
@@ -39,5 +38,5 @@ formatting.
 
 > **Warning:** formatting destroys every partition and all data on the
 > selected disk, including VM disks stored under `/var/lib/libvirt` by a
-> previous installation. Strata never formats a disk implicitly; the
-> installer will require explicit confirmation.
+> previous installation. Strata never formats a disk implicitly;
+> `strata-install` requires you to type the device path first.

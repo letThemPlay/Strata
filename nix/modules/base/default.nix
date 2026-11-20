@@ -1,5 +1,10 @@
 # Core Strata options: enablement, package and node identity.
-{ config, lib, ... }:
+{
+  config,
+  lib,
+  pkgs,
+  ...
+}:
 let
   cfg = config.strata;
   inherit (lib)
@@ -61,6 +66,17 @@ in
       inherit (cfg.node) id role;
     };
 
-    environment.systemPackages = [ cfg.package ];
+    environment.systemPackages = [
+      cfg.package
+      # The host configuration in /etc/nixos is a Git repository (ADR-0013).
+      pkgs.git
+    ];
+
+    # Host configurations are flakes (ADR-0013); enable flakes so they can be
+    # evaluated and rebuilt on the host itself.
+    nix.settings.experimental-features = [
+      "nix-command"
+      "flakes"
+    ];
   };
 }

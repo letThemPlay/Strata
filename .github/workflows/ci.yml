@@ -16,7 +16,8 @@ jobs:
   check:
     name: nix flake check
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # The installer test builds an ISO and installs a host in VMs.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 

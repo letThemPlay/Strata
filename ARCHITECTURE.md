@@ -118,7 +118,7 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | Go module and four binaries | **Implemented** (only the agent has functional commands) |
 | Formatting (gofumpt, goimports, nixfmt) and linting (golangci-lint, statix, deadnix) | **Implemented** |
 | Go unit tests, Nix evaluation tests, NixOS VM tests (including install-and-boot) | **Implemented** |
-| GitHub Actions CI (including VM tests via KVM) | **Implemented** |
+| GitHub Actions CI (all checks evaluated, non-VM checks built; VM tests run locally, ADR-0016) | **Implemented** |
 | Sample infrastructure configuration | **Example only** — no schema, not consumed by any code |
 | NixOS options `strata.{enable,package,node.id,node.role,agent.enable}` | **Implemented** (M1 slice 1, experimental) — see [options](docs/administration/options.md) |
 | Hardware discovery (`strata-agent discover`, `/var/lib/strata/hardware.json`) | **Implemented** (M1 slice 1, experimental; schema `v1alpha1`) |
@@ -359,7 +359,8 @@ Known limitations at the end of M1:
   synchronizes from (CLAUDE.md §8). The installer (M1 slice 4) fills in the
   same three values plus a generated `hardware-configuration.nix`.
 - **Testing:** `nixosConfigurations.reference` is the template plus test values
-  (`nix/hosts/reference.nix`). CI builds it for every supported system, and
+  (`nix/hosts/reference.nix`). It is built for the CI system and evaluated
+  for every supported system, and
   evaluation tests check that the unfilled template fails on exactly the
   three missing values.
 - **Update (M1 slice 4a):** machine-specific values (node ID, admin keys,
@@ -509,3 +510,21 @@ Known limitations at the end of M1:
     certificates, projects and authorization.
   - **README and ARCHITECTURE.md overview** (diagram and summary name
     libvirt, LXC and Podman).
+
+### ADR-0016: NixOS VM tests run locally, not in CI
+
+- **Context:** the NixOS VM tests (`checks.<system>.nixos-*`) boot up to
+  three guests each and, for the installer, build an ISO image. On GitHub's
+  shared 4-CPU runners they ran slowly and, run concurrently, starved the
+  runner until guests took minutes to boot and runs stalled until the job
+  timeout. They are deterministic and pass locally.
+- **Decision:** CI evaluates every check for every system and builds every
+  check except the VM tests (`make nix-check-novm`), then runs the format,
+  lint and Go test targets. The VM tests run locally, with `make vm-test`
+  or `make nix-check`, on a machine with KVM.
+- **Consequences:** a regression that only a VM test detects is not caught
+  by CI. Contributors run `make vm-test` before pushing changes to the Nix
+  modules, the installer, the ISO or the tests, and state in the pull
+  request that it passed. A broken test definition still fails CI, because
+  the tests are evaluated. This can be revisited with dedicated runners
+  that have KVM and enough CPU and memory.

@@ -24,7 +24,7 @@ export CGO_ENABLED ?= 0
 .PHONY: help
 help: ## Show this help
 	@awk 'BEGIN {FS = ":.*## "; printf "Usage: make <target>\n\nTargets:\n"} \
-		/^[a-zA-Z0-9_-]+:.*## / {printf "  %-12s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
+		/^[a-zA-Z0-9_-]+:.*## / {printf "  %-16s %s\n", $$1, $$2}' $(MAKEFILE_LIST)
 
 .PHONY: build
 build: ## Build all binaries into ./bin
@@ -64,8 +64,29 @@ tidy: ## Tidy go.mod
 	go mod tidy
 
 .PHONY: nix-check
-nix-check: ## Run `nix flake check` (builds, tests, format and lint checks)
+nix-check: ## Run `nix flake check` (all checks, including the VM tests)
 	nix flake check
+
+# This machine's Nix system and its check names, evaluated only when used.
+NIX_SYSTEM = $(shell nix eval --impure --raw --expr builtins.currentSystem)
+CHECK_NAMES = nix eval --raw .\#checks.$(NIX_SYSTEM) --apply 'c: builtins.concatStringsSep " " (builtins.attrNames c)'
+
+.PHONY: nix-check-novm
+nix-check-novm: ## Evaluate all checks; build all except the VM tests (what CI runs)
+	nix flake check --all-systems --no-build
+	@targets=(); for c in $$($(CHECK_NAMES)); do \
+		case "$$c" in nixos-*) ;; *) targets+=(".#checks.$(NIX_SYSTEM).$$c") ;; esac; \
+	done; \
+	echo "nix build $${targets[*]}"; \
+	nix build --print-build-logs --no-link "$${targets[@]}"
+
+.PHONY: vm-test
+vm-test: ## Run the NixOS VM tests only (needs KVM; not run in CI)
+	@targets=(); for c in $$($(CHECK_NAMES)); do \
+		case "$$c" in nixos-*) targets+=(".#checks.$(NIX_SYSTEM).$$c") ;; esac; \
+	done; \
+	echo "nix build $${targets[*]}"; \
+	nix build --print-build-logs --no-link "$${targets[@]}"
 
 .PHONY: check
 check: fmt-check lint test nix-check ## Run all local checks

@@ -162,6 +162,7 @@ func TestWizardDHCP(t *testing.T) {
 		testKey,
 		"",  // use these keys: yes
 		"",  // add more: no
+		"",  // no console password
 		"",  // disk: the only usable one is the default
 		"",  // NIC: default eno1 (up)
 		"1", // DHCP
@@ -203,6 +204,7 @@ func TestWizardStaticWithKeysFromFileAndURL(t *testing.T) {
 		"2", "/nonexistent", // unreadable file: back to the menu
 		"2", keyFile, "y", "y", // one key, add more
 		"3", "http://insecure", srv.URL+"/keys", "y", "n", // only the new key is offered
+		"",       // no console password
 		"1", "2", // sdb is unavailable; vda
 		"2", // eth0
 		"2", // static
@@ -250,7 +252,7 @@ func TestWizardRequiresAKey(t *testing.T) {
 func TestWizardFailsWithoutUsableDisk(t *testing.T) {
 	fsys := wizardFS()
 	fsys["proc/mounts"] = file("/dev/vda /data ext4 rw 0 0\n")
-	input := lines("hv-06", "", "1", testKey, "", "")
+	input := lines("hv-06", "", "1", testKey, "", "", "")
 	_, out, err := runWizard(t, input, &Wizard{Root: fsys})
 	if err == nil || !strings.Contains(err.Error(), "no usable disk") || !strings.Contains(out, "is in use") {
 		t.Errorf("err = %v\n%s", err, out)

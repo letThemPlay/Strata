@@ -127,7 +127,7 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | `strata.disk` (disko ext4 layout, systemd-boot, UEFI), host flake template, reference host | **Implemented** (M1 slice 3, experimental) |
 | Installer ISO and `strata-install plan/apply` (answer file, offline install) | **Implemented** (M1 slice 4a, experimental) |
 | `strata-install init` (interactive answer file wizard) | **Implemented** (M1 slice 4b, experimental) |
-| Physical hardware validation | **Pending** (M1 slice 5): [procedure](docs/installation/hardware-validation.md) ready, not yet run |
+| Physical hardware validation | **In progress** (M1 slice 5): Intel (Lenovo ThinkServer TS140) **passed**; AMD pending. See [results](docs/installation/hardware-validation.md#results) |
 | VM management | Planned (M2); workload backend under evaluation (libvirt/LXC/Podman or Incus, [ADR-0015](#adr-0015-workload-backend-under-evaluation-incus)) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
 | Containers (LXC, OCI), ZFS, LVM | Planned (M4); backend under evaluation ([ADR-0015](#adr-0015-workload-backend-under-evaluation-incus)) |
@@ -160,21 +160,34 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
    report), not by managing workloads (ADR-0015). The guide and the
    [validation procedure](docs/installation/hardware-validation.md) are
    written; the `nixos-installer` test builds what a physical install builds
-   (redistributable firmware, microcode). **Pending: running the procedure
-   on physical machines.**
+   (redistributable firmware, microcode). **Intel passed** (ThinkServer
+   TS140, 2026-11-23); its findings led to the console password, the
+   existing-data warning and the management interface fix. **Pending: one
+   AMD machine.**
 
 ### M1 status
 
 Everything except the acceptance run on physical hardware is done and
 passes in VMs. **M1 is not accepted until the
 [hardware validation](docs/installation/hardware-validation.md) passes on
-at least one Intel and one AMD machine.** No workload management (libvirt,
+at least one Intel and one AMD machine.** Intel has passed; AMD is
+pending. No workload management (libvirt,
 LXC, Podman, Incus) exists: the agent and the Go code contain none, and on
 a host libvirtd runs as a host service only, unused by Strata.
 
 Known limitations at the end of M1:
 
-- **Not validated on physical hardware** (see above).
+- **Validated on one physical machine (Intel) so far**; AMD pending.
+- The IOMMU is not enabled on the kernel command line, so on Intel there
+  are no IOMMU groups even with VT-d enabled. Needed later for PCI
+  passthrough and DMA protection; a host-level, backend-independent
+  setting (proposed: a `strata.compute` option, on by default).
+- Installing from remote IP KVM virtual media (JetKVM) did not work; use a
+  USB stick.
+- On reused machines, LVM groups on other disks are activated
+  automatically at boot (standard NixOS behaviour), which conflicts with
+  the decision that workload storage uses explicitly configured pools only
+  (ADR-0015); to be settled with the M4 storage work.
 - One system disk layout: ext4 on a single disk, UEFI only, systemd-boot,
   no mirroring, no swap, no Secure Boot.
 - Management network: one interface, static or DHCP; no VLAN or bond.
@@ -299,6 +312,19 @@ Known limitations at the end of M1:
 - **Consequence:** With no passwords, the admin's SSH keys are
   root-equivalent. Per-admin accounts and finer-grained authorization arrive
   with RBAC (M5).
+- **Update (M1 hardware validation): optional console password.** On the
+  first physical install, a wrong management interface made the host
+  unreachable, and with no password there was no console login either: the
+  only recovery was to reinstall. `strata.access.admin.consolePasswordFile`
+  now optionally gives the admin a password for the **local console**
+  (physical, or through a remote KVM). SSH still accepts keys only. The
+  installer asks for it, keeps only its hash, and writes it to
+  `/etc/strata/admin-console-password` (root-only), outside the Nix store
+  and the configuration repository, as CLAUDE.md requires for secrets. NixOS
+  reads the file when it creates the account; later changes use `passwd`.
+  With passwordless sudo, the console password is root-equivalent, like the
+  keys; someone at the console can also boot other media, so it adds little
+  exposure. Without it, the account stays locked as before.
 
 ### ADR-0011: systemd-networkd and an interface-scoped firewall for management
 
@@ -400,6 +426,15 @@ Known limitations at the end of M1:
     Git credentials.
   - External programs (`nix`, `nixos-install`, `git`, the disko script) are
     run with explicit arguments and timeouts, never through a shell.
+  - **Existing data** (update after the first physical install): `plan`,
+    `apply` and `init` list the filesystems and inactive ZFS, LVM and RAID
+    members found on the target disk (from udev's blkid results in
+    `/run/udev/data`), and the wizard asks before it selects such a disk.
+    Disks in use (mounted, swap, active LVM/RAID) stay unavailable. The
+    typed confirmation is still required for every disk.
+  - **Management interface** (same update): only the chosen interface is
+    configured on the host, so the wizard pre-selects one only if it has a
+    link, and otherwise asks the operator to connect the cable and re-scan.
   - `strata-install init` (slice 4b) is an interactive front end that only
     produces an answer file: it offers the machine's whole disks (by their
     `/dev/disk/by-id/` names, with the same checks as `plan`) and

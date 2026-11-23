@@ -49,7 +49,16 @@ type Admin struct {
 	Name string `json:"name,omitempty"`
 	// AuthorizedKeys are the OpenSSH public keys allowed to log in.
 	AuthorizedKeys []string `json:"authorizedKeys"`
+	// ConsolePasswordHash, if set, is the crypt(3) hash of a password for
+	// local console login (recovery). SSH never accepts passwords. The
+	// installer stores it in ConsolePasswordPath on the installed system,
+	// outside the Nix store and the host's Git repository.
+	ConsolePasswordHash string `json:"consolePasswordHash,omitempty"`
 }
+
+// ConsolePasswordPath is where the installed system keeps the console
+// password hash (strata.access.admin.consolePasswordFile).
+const ConsolePasswordPath = "/etc/strata/admin-console-password" //nolint:gosec // A path, not a credential.
 
 // Disk selects the system disk (strata.disk).
 type Disk struct {
@@ -75,11 +84,15 @@ type Network struct {
 // installer is stricter, so that every accepted value is also safe to
 // write into a Nix string.
 var (
-	nodeIDPattern    = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
-	userNamePattern  = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
-	sshKeyPattern    = regexp.MustCompile(`^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+=*( [^\x00-\x1f\x7f]*)?$`)
-	devicePattern    = regexp.MustCompile(`^/dev/[A-Za-z0-9._:+@/-]+$`)
-	interfacePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
+	nodeIDPattern   = regexp.MustCompile(`^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$`)
+	userNamePattern = regexp.MustCompile(`^[a-z_][a-z0-9_-]{0,31}$`)
+	sshKeyPattern   = regexp.MustCompile(`^(ssh-(ed25519|rsa)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+=*( [^\x00-\x1f\x7f]*)?$`)
+	// Hashes as written by mkpasswd/crypt(3): yescrypt, gost-yescrypt,
+	// scrypt, bcrypt, SHA-512 and SHA-256 crypt. Locked or empty values
+	// ("!", "*", "") are not hashes.
+	passwordHashPattern = regexp.MustCompile(`^\$(y|gy|7|2[aby]|6|5)\$[A-Za-z0-9./$=,]{8,500}$`)
+	devicePattern       = regexp.MustCompile(`^/dev/[A-Za-z0-9._:+@/-]+$`)
+	interfacePattern    = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
 )
 
 // layouts lists the supported disk layouts (installer/partitioning).
@@ -135,6 +148,9 @@ func (a Answers) Validate() error {
 		if err := checkSSHKey(k); err != nil {
 			add(fmt.Sprintf("admin.authorizedKeys[%d]", i), "%v", err)
 		}
+	}
+	if h := a.Admin.ConsolePasswordHash; h != "" && !passwordHashPattern.MatchString(h) {
+		add("admin.consolePasswordHash", "not a supported password hash (e.g. from `mkpasswd -m yescrypt`); never put a plain password here")
 	}
 
 	if !devicePattern.MatchString(a.Disk.Device) || strings.Contains(a.Disk.Device, "/../") {

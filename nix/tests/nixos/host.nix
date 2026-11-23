@@ -165,7 +165,9 @@ pkgs.testers.runNixOSTest {
         admin.succeed(f"nc -z -w 3 {mgmt} 22")  # positive control
 
     with subtest("libvirt runs unprivileged QEMU and no libvirt network is active"):
-        hv01.wait_for_unit("libvirtd.service")
+        # libvirtd is socket-activated and exits when idle (--timeout 120):
+        # virsh starts it.
+        hv01.wait_for_unit("libvirtd.socket")
         hv01.succeed("virsh -c qemu:///system version")
         hv01.succeed("grep -Fx 'user = \"qemu-libvirtd\"' /var/lib/libvirt/qemu.conf")
         # NixOS defines libvirt's "default" NAT network but does not

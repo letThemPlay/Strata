@@ -195,6 +195,30 @@ let
           "authorizedKeys"
         ];
     "access requires strata.enable" = requiresEnable "access" { admin.authorizedKeys = [ testKey ]; };
+    "access sets a console password from a file, SSH stays key-only" =
+      let
+        c =
+          (hostWith [
+            static
+            { strata.access.admin.consolePasswordFile = "/etc/strata/admin-console-password"; }
+          ]).config;
+        u = c.users.users.strata-admin;
+      in
+      u.hashedPasswordFile == "/etc/strata/admin-console-password"
+      && u.hashedPassword == null
+      && !c.services.openssh.settings.PasswordAuthentication
+      && !c.services.openssh.settings.KbdInteractiveAuthentication;
+    "access rejects a relative console password file" =
+      rejects
+        (eval [
+          { strata.access.admin.consolePasswordFile = "admin-console-password"; }
+        ])
+        [
+          "strata"
+          "access"
+          "admin"
+          "consolePasswordFile"
+        ];
 
     # ---- networking ----
     "networking uses systemd-networkd and nftables" =

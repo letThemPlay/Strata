@@ -34,6 +34,7 @@ settings. Every problem is reported at once.
 | `node.id` | yes | Node ID and hostname: lowercase letters, digits and `-`, 1–63 characters, not starting or ending with `-`. | `strata.node.id` |
 | `admin.name` | no | Admin account name. Default `strata-admin`; `root` is rejected. | `strata.access.admin.name` |
 | `admin.authorizedKeys` | yes | One or more OpenSSH public keys (`ssh-ed25519`, `ssh-rsa`, `ecdsa-sha2-nistp*`, `sk-*@openssh.com`), one line each, without `authorized_keys` options. The key data must be valid base64 of a key of the named type. | `strata.access.admin.authorizedKeys` |
+| `admin.consolePasswordHash` | no | crypt(3) hash of a password for local console login (recovery); SSH never accepts passwords. Create it with `mkpasswd -m yescrypt` (yescrypt, bcrypt, SHA-512 and similar are accepted; plain passwords are rejected). The installer writes it to `/etc/strata/admin-console-password` (root-only) on the host, not into the configuration. `strata-install init` asks for the password and stores only the hash. | `strata.access.admin.consolePasswordFile` |
 | `disk.device` | yes | The disk to erase and install on. Use a `/dev/disk/by-id/` path. | `strata.disk.device` |
 | `disk.layout` | no | Default and only value: `ext4`. See [disk layout](disk-layout.md). | `strata.disk.layout` |
 | `network.interface` | yes | Management interface name (`ip link`). | `strata.networking.management.interface` |
@@ -52,3 +53,8 @@ before the disk is touched.
 `strata-install plan` additionally checks the file against the machine: the
 disk must exist, be a whole disk of at least 16 GiB, and have nothing
 mounted, used as swap or built on it (LVM, RAID); the interface must exist.
+It lists existing data on the disk (filesystems, inactive ZFS, LVM or RAID
+members, as found by udev), which installing destroys.
+
+Treat an answer file with a console password hash like a password file:
+the hash can be attacked offline.

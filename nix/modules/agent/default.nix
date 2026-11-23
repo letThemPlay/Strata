@@ -1,8 +1,10 @@
 # Strata node agent service.
 #
-# The agent currently only performs hardware discovery, so it runs as an
-# unprivileged dynamic user with no network access and no capabilities
-# (ADR-0007). Privileges are granted explicitly when a feature needs them.
+# The agent runs as an unprivileged dynamic user with no capabilities
+# (ADR-0007). Privileges are granted explicitly when a feature needs them:
+# on a compute host it may reach the Incus API over loopback (and nothing
+# else), with its restricted identity passed as systemd credentials
+# (ADR-0017). It never gets the Incus Unix socket.
 {
   config,
   lib,
@@ -11,6 +13,12 @@
 }:
 let
   cfg = config.strata;
+  incus = cfg.compute.enable;
+  incusArgs = lib.optionalString incus (
+    " --incus-address ${cfg.compute.incus.address}"
+    + " --incus-project ${cfg.compute.incus.project}"
+    + " --incus-credentials %d"
+  );
 in
 {
   options.strata.agent = {
@@ -28,11 +36,12 @@ in
     systemd.services.strata-agent = {
       description = "Strata node agent";
       wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" ];
+      after = [ "local-fs.target" ] ++ lib.optional incus "strata-incus-setup.service";
+      wants = lib.optional incus "strata-incus-setup.service";
 
       serviceConfig = {
         Type = "simple";
-        ExecStart = "${lib.getExe' cfg.package "strata-agent"} run --state-dir /var/lib/strata --interval 1m";
+        ExecStart = "${lib.getExe' cfg.package "strata-agent"} run --state-dir /var/lib/strata --interval 1m${incusArgs}";
         ExecReload = "${pkgs.coreutils}/bin/kill -HUP $MAINPID";
         Restart = "on-failure";
         RestartSec = 5;
@@ -46,12 +55,25 @@ in
         # so PrivateDevices= and ProcSubset=pid are intentionally not set.
         # PrivateNetwork= is not used either: it would hide the host's
         # interfaces from /sys/class/net. Network access is denied through
-        # RestrictAddressFamilies= and IPAddressDeny= instead.
+        # RestrictAddressFamilies= and IPAddressDeny= instead; on a compute
+        # host only loopback is allowed (the Incus API).
         CapabilityBoundingSet = "";
         AmbientCapabilities = "";
         NoNewPrivileges = true;
-        RestrictAddressFamilies = [ "AF_UNIX" ];
+        RestrictAddressFamilies = [
+          "AF_UNIX"
+        ]
+        ++ lib.optionals incus [
+          "AF_INET"
+          "AF_INET6"
+        ];
         IPAddressDeny = "any";
+        IPAddressAllow = lib.mkIf incus "localhost";
+        LoadCredential = lib.mkIf incus [
+          "incus-client.crt:/var/lib/strata-incus/client.crt"
+          "incus-client.key:/var/lib/strata-incus/client.key"
+          "incus-server.crt:/var/lib/incus/server.crt"
+        ];
         ProtectSystem = "strict";
         ProtectHome = true;
         PrivateTmp = true;

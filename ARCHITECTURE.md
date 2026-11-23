@@ -1,7 +1,7 @@
 # Strata Architecture
 
-**Status:** Milestone M1 complete. Incus is the workload backend (ADR-0015);
-M2 has not started. This document describes the target
+**Status:** Milestone M1 complete; M2 in progress (slice 1: Incus host and
+the agent's restricted identity). Incus is the workload backend (ADR-0015). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
 
@@ -99,6 +99,7 @@ today:
 | `internal/hardware` | Hardware discovery from procfs/sysfs (no exec) |
 | `internal/agent` | Agent run loop, atomic report writing, agent subcommands |
 | `internal/install` | Answer file, `host.nix` rendering, disk and NIC probing, installation steps |
+| `internal/incus` | Minimal Incus API client (loopback HTTPS, client identity, pinned server certificate) |
 | `nix/packages/` | Package definitions (`strata`) |
 | `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring`, `disk` |
 | `nix/hosts/` | Test values completing the host template into the reference host |
@@ -111,7 +112,7 @@ today:
 | `.github/workflows/` | CI |
 
 Planned (not yet created):
-`internal/{workload,incus,storage,networking,...}` (M2+), `internal/{gitops,schema,
+`internal/{workload,storage,networking,...}` (M2+), `internal/{gitops,schema,
 planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 `internal/cluster` (M6).
 
@@ -128,12 +129,13 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | NixOS options `strata.{enable,package,node.id,node.role,agent.enable}` | **Implemented** (M1 slice 1, experimental) — see [options](docs/administration/options.md) |
 | Hardware discovery (`strata-agent discover`, `/var/lib/strata/hardware.json`) | **Implemented** (M1 slice 1, experimental; schema `v1alpha1`) |
 | Agent systemd service (unprivileged, no network) | **Implemented** (M1 slice 1, experimental) |
-| NixOS options `strata.{compute,access,networking,monitoring}.*` (libvirt, key-only SSH, management network + nftables, node exporter) | **Implemented** (M1 slice 2, experimental) |
+| NixOS options `strata.{compute,access,networking,monitoring}.*` (compute host, key-only SSH, management network + nftables, node exporter) | **Implemented** (M1 slice 2, experimental) |
+| Incus on compute hosts (replaces libvirtd), restricted Strata project, agent identity and backend status (`/var/lib/strata/backend.json`) | **Implemented** (M2 slice 1, experimental; ADR-0017) |
 | `strata.disk` (disko ext4 layout, systemd-boot, UEFI), host flake template, reference host | **Implemented** (M1 slice 3, experimental) |
 | Installer ISO and `strata-install plan/apply` (answer file, offline install) | **Implemented** (M1 slice 4a, experimental) |
 | `strata-install init` (interactive answer file wizard) | **Implemented** (M1 slice 4b, experimental) |
 | Physical hardware validation | **Passed** (M1 slice 5): Intel (Lenovo ThinkServer TS140) and AMD (GMKtec M6 Ultra). See [results](docs/installation/hardware-validation.md#results) |
-| VM management | Planned (M2), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
+| Storage pools, guest networks, VM schema and lifecycle | Planned (M2 slices 2+), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
 | System and OCI containers, ZFS, LVM-thin | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
@@ -203,9 +205,24 @@ Known limitations at the end of M1:
   revisions until updated with `nix flake update`.
 - The agent only discovers hardware; it has no API and no network access
   (ADR-0007).
-- `strata.compute` enables libvirtd although no workloads are managed; the
-  first M2 slice replaces it with Incus (ADR-0015).
+- `strata.compute` enabled libvirtd although no workloads were managed;
+  M2 slice 1 replaced it with Incus (ADR-0015).
 - `strata`, `strata-api` and `strata-controller` are placeholders.
+
+## M2 plan
+
+M2 ("manage VMs through the CLI") is delivered in slices, through Incus
+(ADR-0015):
+
+1. Incus on compute hosts instead of libvirtd; the API on loopback only; a
+   restricted Strata project whose configuration is enforced on every boot;
+   the agent's restricted TLS identity and backend status (ADR-0017),
+   proven by the `nixos-incus` VM test. **Done.**
+2. Storage pools on dedicated disks (ZFS, LVM-thin, directory), declared in
+   NixOS, with allocation policies (project limits). Planned.
+3. Guest networks: Incus-managed networks declared in NixOS, isolated from
+   the management interface. Planned.
+4. VM schema, the Incus provider and VM lifecycle through the CLI. Planned.
 
 ## Architecture decision records
 
@@ -282,6 +299,13 @@ Known limitations at the end of M1:
   gets a TLS client identity that Incus restricts to Strata's projects,
   reached over loopback; never the Incus Unix socket. Its hardening is
   relaxed only for that (loopback TCP, its own key), with a test.
+- **Update (M2 slice 1, ADR-0017):** on a compute host the agent may open
+  IPv4/IPv6 sockets, but `IPAddressAllow=localhost` on top of
+  `IPAddressDeny=any` limits it to loopback. Its identity arrives through
+  `LoadCredential=`. Everything else is unchanged; without `strata.compute`
+  the agent has no network access at all. A failure of
+  `strata-incus-setup` (no identity to load) stops the agent from starting
+  on a compute host, which `systemctl --failed` shows.
 
 ### ADR-0008: Versioned hardware report
 
@@ -347,6 +371,11 @@ Known limitations at the end of M1:
   and replaced by Incus networks declared in NixOS. The Incus API is never
   opened on any interface, and no guest network may reach the management
   interface.
+- **Update (M2 slice 1):** libvirtd is gone. The Incus API listens on
+  `127.0.0.1:8443` only, and no Incus network exists until guest networks
+  are declared (M2 slice 3); `nixos-host` asserts there is no managed Incus
+  network and no `incusbr0`, `nixos-incus` that port 8443 is closed from the
+  management network.
 - **Known limitation:** disruptive network changes are not rolled back
   automatically yet. Recovery relies on NixOS generations (`nixos-rebuild
   test`, boot-menu rollback) and console access. Automatic rollback belongs to
@@ -604,3 +633,53 @@ Known limitations at the end of M1:
   request that it passed. A broken test definition still fails CI, because
   the tests are evaluated. This can be revisited with dedicated runners
   that have KVM and enough CPU and memory.
+
+### ADR-0017: The agent's Incus identity
+
+- **Status:** Accepted (M2 slice 1). Implements the agent access decision of
+  ADR-0015.
+- **Context:** ADR-0015 decided that the agent uses a TLS identity that
+  Incus restricts to Strata's project, over a loopback-only API, never the
+  Incus Unix socket. This ADR records how the identity is created, trusted
+  and delivered, and what enforces the project's restrictions.
+- **Decision:**
+  - **Project:** `strata-incus-setup.service` (root, oneshot, after Incus)
+    creates the project or replaces its whole configuration with a `PUT` on
+    every boot, so changes made by hand are reverted. All restriction keys
+    are listed explicitly (`restricted=true` plus each `restricted.*`
+    value), so that a change of Incus's defaults cannot loosen them.
+    Networks stay in the default project, where a restricted identity can
+    only view them.
+  - **Identity:** the same service generates an EC P-384 key and a
+    self-signed client certificate (`CN=strata-agent@<node id>`, 10 years)
+    in `/var/lib/strata-incus/` (0700, root) if they do not exist. The key
+    never leaves the host and is not in Git or the Nix store.
+  - **Trust:** exactly one trust entry named `strata-agent`: restricted,
+    type client, projects = [the Strata project]. Entries with that name and
+    another fingerprint, and an entry for this certificate with other
+    permissions, are removed and the correct entry is added.
+  - **Delivery:** the agent (a `DynamicUser`) receives the key, certificate
+    and Incus's server certificate through `LoadCredential=`; it cannot read
+    `/var/lib/strata-incus` or the Incus Unix socket, and is not in
+    `incus-admin`.
+  - **Connection:** `internal/incus` connects only to a loopback IP address,
+    requires TLS 1.3 and accepts only the pinned server certificate (no CA,
+    no host name). It uses the Go standard library only (ADR-0004); whether
+    the Incus Go client is adopted is decided with the provider slice.
+  - **Status:** every agent cycle checks `GET /1.0` in the project and
+    writes `/var/lib/strata/backend.json`
+    (`backend.strata.dev/v1alpha1`: backend, reachable, trusted, version,
+    error). Failures are reported there and logged at warning level; they
+    do not stop hardware discovery.
+- **Verified by:** the `nixos-incus` VM test (allowed and refused operations
+  with the agent's identity, loopback-only API, Unix socket denied,
+  enforcement of project configuration and trust after tampering,
+  containers surviving an incusd restart) and `module-eval`.
+- **Consequences and limitations:**
+  - The setup service is the only Strata code that uses the Incus Unix
+    socket; it runs as root from NixOS at boot, never on request.
+  - Rotating the identity means deleting `/var/lib/strata-incus/client.*`
+    and restarting `strata-incus-setup` and `strata-agent`.
+  - Snapshots and backups are blocked by the project restrictions until the
+    storage slice decides them; image sources (`restricted.images.servers`)
+    are decided with the VM schema slice.

@@ -119,11 +119,60 @@ let
     "full DHCP host has no failed assertions" = failedAssertions dhcpHost == [ ];
 
     # ---- compute ----
-    "compute enables libvirtd with host-only QEMU" =
-      hc.virtualisation.libvirtd.enable
-      && hc.virtualisation.libvirtd.qemu.package.outPath == pkgs.qemu_kvm.outPath;
-    "compute runs QEMU unprivileged" = !hc.virtualisation.libvirtd.qemu.runAsRoot;
-    "compute shuts guests down on host shutdown" = hc.virtualisation.libvirtd.onShutdown == "shutdown";
+    "compute enables Incus LTS and not libvirtd" =
+      hc.virtualisation.incus.enable
+      && hc.virtualisation.incus.package.outPath == pkgs.incus-lts.outPath
+      && !hc.virtualisation.libvirtd.enable;
+    "compute keeps the Incus API on loopback, without the web UI" =
+      hc.virtualisation.incus.preseed.config."core.https_address" == "127.0.0.1:8443"
+      && !hc.virtualisation.incus.ui.enable
+      && !(lib.elem 8443 hc.networking.firewall.allowedTCPPorts);
+    "compute starts Incus at boot and keeps instances on daemon restart" =
+      !hc.virtualisation.incus.socketActivation && hc.virtualisation.incus.softDaemonRestart;
+    "compute sets up the restricted project before the agent" =
+      let
+        s = hc.systemd.services.strata-incus-setup;
+      in
+      lib.elem "strata-agent.service" s.before
+      && lib.elem "incus.service" s.requires
+      && s.serviceConfig.StateDirectoryMode == "0700";
+    "compute without strata.networking still uses nftables" =
+      (eval [
+        {
+          strata = {
+            enable = true;
+            node.id = "hv-01";
+            compute.enable = true;
+          };
+        }
+      ]).config.networking.nftables.enable;
+    "compute rejects the default project" = hasFailure "must not be \"default\"" (hostWith [
+      static
+      { strata.compute.incus.project = "default"; }
+    ]);
+    "compute rejects a malformed project name" =
+      rejects (hostWith [ { strata.compute.incus.project = "Strata_1"; } ])
+        [
+          "strata"
+          "compute"
+          "incus"
+          "project"
+        ];
+    "agent on a compute host reaches only loopback, with Incus credentials" =
+      let
+        a = hc.systemd.services.strata-agent;
+        s = a.serviceConfig;
+      in
+      s.IPAddressDeny == "any"
+      && s.IPAddressAllow == "localhost"
+      && lib.elem "AF_INET" s.RestrictAddressFamilies
+      && lib.any (lib.hasPrefix "incus-client.key:/var/lib/strata-incus/") s.LoadCredential
+      && lib.hasInfix "--incus-address 127.0.0.1:8443 --incus-project strata --incus-credentials %d" s.ExecStart
+      && !(lib.elem "incus-admin" (a.serviceConfig.SupplementaryGroups or [ ]));
+    "agent without compute has no Incus access" =
+      !(agentService ? LoadCredential)
+      && !(agentService ? IPAddressAllow)
+      && !(lib.hasInfix "--incus" agentService.ExecStart);
     "compute does not hardcode vendor KVM modules" =
       !(lib.elem "kvm-intel" hc.boot.kernelModules) && !(lib.elem "kvm-amd" hc.boot.kernelModules);
     "compute requires strata.enable" = requiresEnable "compute" { };

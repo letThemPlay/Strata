@@ -196,11 +196,12 @@ pkgs.testers.runNixOSTest {
         installed.succeed("test -n \"$(ls /run/current-system/firmware/)\"")
 
     with subtest("Strata host services run"):
-        for unit in ["strata-agent.service", "sshd.service", "libvirtd.socket",
-                     "prometheus-node-exporter.service"]:
+        for unit in ["strata-agent.service", "sshd.service", "incus.service",
+                     "strata-incus-setup.service", "prometheus-node-exporter.service"]:
             installed.wait_for_unit(unit)
-        # libvirtd is socket-activated and exits when idle (--timeout 120).
-        installed.succeed("virsh -c qemu:///system version")
+        installed.succeed("incus info > /dev/null")
+        # The agent reaches Incus with its restricted identity.
+        installed.wait_until_succeeds("grep -Eq '\"trusted\": ?true' /var/lib/strata/backend.json", timeout=60)
         installed.succeed("grep -q '${keys.snakeOilEd25519PublicKey}' /etc/ssh/authorized_keys.d/strata-admin")
 
     with subtest("the admin can log in on the console with the console password"):

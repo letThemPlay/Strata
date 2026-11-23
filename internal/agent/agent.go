@@ -1,9 +1,10 @@
 // Package agent implements the Strata node agent.
 //
-// In milestone M1 the agent only discovers the node's hardware and
-// publishes it as a JSON report in its state directory. It has no network
-// interface: remote access is introduced together with authentication in a
-// later milestone.
+// The agent discovers the node's hardware and publishes it as a JSON report
+// in its state directory. On a compute host it also checks that it can use
+// the workload backend (Incus, through a restricted identity) and publishes
+// that status. It has no network interface: remote access is introduced
+// together with authentication in a later milestone.
 package agent
 
 import (
@@ -42,6 +43,9 @@ type Options struct {
 	Interval time.Duration
 	// Logger receives structured logs. A nil Logger discards logs.
 	Logger *slog.Logger
+	// Backend checks the workload backend in every cycle. Nil means the
+	// node has no workload backend.
+	Backend BackendCheck
 }
 
 // Run performs an initial discovery, then repeats discovery every Interval
@@ -69,7 +73,14 @@ func Run(ctx context.Context, opts Options) error {
 	if err != nil {
 		return err
 	}
-	log.InfoContext(ctx, "agent started", "stateDir", opts.StateDir, "interval", opts.Interval.String())
+	var backend *BackendStatus
+	if opts.Backend != nil {
+		backend = checkBackend(ctx, opts, log, nil)
+	} else if err := removeBackendStatus(opts.StateDir); err != nil {
+		return err
+	}
+	log.InfoContext(ctx, "agent started", "stateDir", opts.StateDir, "interval", opts.Interval.String(),
+		"backend", opts.Backend != nil)
 
 	var tick <-chan time.Time
 	if opts.Interval > 0 {
@@ -86,6 +97,9 @@ func Run(ctx context.Context, opts Options) error {
 		case <-opts.Reload:
 			log.InfoContext(ctx, "reload requested")
 		case <-tick:
+		}
+		if opts.Backend != nil {
+			backend = checkBackend(ctx, opts, log, backend)
 		}
 		report, err := refresh(ctx, opts, log, last)
 		if err != nil {

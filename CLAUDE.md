@@ -1,6 +1,6 @@
 # Strata — Claude Code Project Specification
 
-**Version:** 0.1.0  
+**Version:** 0.2.0 (workload backend revised: Incus, ADR-0015)  
 **Status:** Initial development specification  
 **Project:** Strata  
 **Platform:** NixOS  
@@ -93,7 +93,7 @@ Repeatedly applying an unchanged configuration must not create unnecessary infra
 
 ### Modularity
 
-Compute, storage, networking, and container runtimes must have independent provider implementations.
+Workload, storage, and networking concerns must be separated behind interfaces. The workload backend (Incus) is accessed only through its provider package, so that it can be replaced by a mock in tests and is not referenced elsewhere.
 
 ### Separation of concerns
 
@@ -115,16 +115,16 @@ Use the following technology choices unless an architectural decision is explici
 | Configuration | Nix flakes |
 | Hypervisor | KVM |
 | VM runtime | QEMU |
-| VM management | libvirt |
-| System containers | LXC |
-| OCI containers | Podman |
+| Workload management | Incus (LTS release) |
+| System containers | LXC, managed by Incus |
+| OCI containers | Incus OCI application containers |
 | Backend | Go |
 | Frontend | React |
 | Frontend language | TypeScript |
 | API | REST and WebSockets |
 | Database | PostgreSQL |
-| Cluster coordination | etcd |
-| Local storage | ZFS and LVM-thin |
+| Cluster coordination | Decided in M6 (Incus clustering is the likely candidate) |
+| Local storage | ZFS and LVM-thin, as Incus storage pools on dedicated disks |
 | Distributed storage | Ceph |
 | Networking | Linux bridges, VLANs, nftables |
 | Secrets | SOPS and age |
@@ -134,7 +134,9 @@ Use the following technology choices unless an architectural decision is explici
 
 Do not introduce Kubernetes, OpenStack, or additional orchestration platforms unless explicitly justified.
 
-Do not replace libvirt with a custom QEMU management implementation in the initial release.
+Do not replace Incus with a custom QEMU or LXC management implementation, and do not reimplement instance lifecycle management that Incus provides. Do not manage workloads through libvirt or a separate Podman runtime.
+
+The decision and its rationale are recorded in ARCHITECTURE.md, ADR-0015.
 
 # 4. Architecture
 
@@ -175,11 +177,8 @@ Responsible for actual workload execution.
 Components:
 
 - NixOS host.
-- KVM/QEMU.
-- libvirt.
-- LXC.
-- Podman.
-- Storage providers.
+- KVM/QEMU and LXC, managed by Incus.
+- Storage pools (Incus).
 - Networking providers.
 - Node agents.
 
@@ -236,9 +235,8 @@ Strata/
 │   ├── reconciler/
 │   ├── executor/
 │   ├── inventory/
-│   ├── compute/
-│   ├── lxc/
-│   ├── oci/
+│   ├── workload/
+│   ├── incus/
 │   ├── storage/
 │   ├── networking/
 │   ├── cluster/
@@ -280,8 +278,7 @@ The initial host implementation must support:
 - Host identity.
 - Hardware configuration.
 - KVM.
-- QEMU.
-- libvirt.
+- Incus (QEMU and LXC).
 - SSH.
 - Host monitoring.
 - Network configuration.
@@ -333,7 +330,7 @@ The initial configuration model must support:
 - Nodes.
 - Clusters.
 - Virtual machines.
-- LXC containers.
+- System containers.
 - OCI containers.
 - Storage pools.
 - Volumes.
@@ -503,11 +500,13 @@ Destructive operations require explicit approval.
 
 # 10. Workload providers
 
-Support three separate execution providers.
+Incus is the single workload backend (ARCHITECTURE.md, ADR-0015). Strata is the declarative layer: it plans changes and applies them through the Incus API. Incus owns instance lifecycles.
+
+Strata supports three workload types, all executed by Incus:
 
 ## 10.1 Virtual machines
 
-Backend: KVM/QEMU and libvirt.
+Backend: KVM/QEMU, managed by Incus.
 
 Implement:
 
@@ -523,13 +522,13 @@ Implement:
 - Network interface management.
 - Autostart.
 
-Do not expose raw libvirt XML as the primary public configuration interface.
+Do not expose raw Incus or QEMU configuration as the primary public configuration interface.
 
 Maintain an independent Strata VM schema.
 
-## 10.2 LXC containers
+## 10.2 System containers
 
-Backend: LXC.
+Backend: LXC, managed by Incus.
 
 Implement:
 
@@ -542,11 +541,11 @@ Implement:
 
 Unprivileged containers must be the default.
 
-Do not silently enable privileged container execution.
+Do not silently enable privileged container execution. Strata's Incus projects forbid privileged containers.
 
 ## 10.3 OCI containers
 
-Backend: Podman.
+Backend: Incus OCI application containers.
 
 Implement:
 
@@ -556,12 +555,19 @@ Implement:
 - Resource limits.
 - Persistent volumes.
 - Network configuration.
-- Health checks.
-- Restart policies.
+- Restart policies, where Incus supports them.
 
-Do not assume Docker-specific behavior is identical to Podman behavior.
+Do not assume Docker or Podman behavior. Podman features without an Incus equivalent (for example health checks and pods) are documented as unsupported, not reimplemented.
 
-Expose runtime-specific capabilities through the provider interface.
+## 10.4 Backend access
+
+The node agent accesses Incus only through a TLS client identity that Incus restricts to Strata's projects. Those projects are restricted (no privileged containers, no host device or path passthrough, no raw configuration) and have resource limits.
+
+Never give a Strata component access to the Incus Unix socket or an unrestricted Incus identity.
+
+Storage pools, networks, projects, and project restrictions are server-level Incus configuration. They are declared through NixOS, not created by the agent.
+
+Expose backend capabilities and limitations through the provider interface.
 
 # 11. Go backend standards
 
@@ -615,7 +621,7 @@ Initial resources:
 /nodes
 /clusters
 /vms
-/lxc
+/containers
 /oci
 /storage
 /networks
@@ -644,8 +650,8 @@ The dashboard should provide:
 - Node overview.
 - Hardware information.
 - VM management.
-- LXC management.
-- OCI management.
+- System container management.
+- OCI container management.
 - Storage management.
 - Networking.
 - Configuration revisions.
@@ -664,7 +670,7 @@ Show administrators the planned impact of configuration changes before applying 
 
 # 14. Storage architecture
 
-Initial backends:
+Initial backends, as Incus storage pools:
 
 - ZFS.
 - LVM-thin.
@@ -674,7 +680,9 @@ Future backend:
 
 - Ceph.
 
-Implement a storage provider interface.
+Storage pools are declared through NixOS on dedicated disks, with explicit configuration and allocation policies. Workload storage never uses the system disk.
+
+Volumes are managed through Incus by the Incus provider.
 
 Separate storage configuration from persistent data.
 
@@ -704,7 +712,7 @@ Support:
 
 Host networking must be managed through NixOS.
 
-Workload networking should be managed through dedicated Strata network providers.
+Workload networks are Incus networks declared through NixOS. Workloads attach only to networks their project is allowed to use. No workload network may reach the management interface.
 
 Do not apply disruptive network changes without a recovery mechanism.
 
@@ -719,8 +727,9 @@ Use:
 - Node agents.
 - Central controller.
 - PostgreSQL.
-- etcd for coordination.
 - Git for desired configuration.
+
+Cluster coordination is designed in M6. Incus clustering is the likely candidate for workload placement and migration. Do not introduce etcd or Incus clustering before M6.
 
 Do not implement automatic failover until quorum, fencing, workload ownership, and storage consistency have been designed and tested.
 
@@ -750,13 +759,15 @@ Never:
 - Commit plaintext secrets.
 - Place secrets directly into ordinary Nix configuration values.
 - Expose privileged sockets publicly.
+- Give any Strata component access to the Incus Unix socket or an unrestricted Incus identity.
+- Expose the Incus API on any network interface.
 - Give the API server unrestricted root access.
 - Execute untrusted shell commands.
 - Automatically trust arbitrary Git repositories.
 
 Use SOPS and age for encrypted configuration secrets.
 
-Use a dedicated privileged node agent for local infrastructure operations.
+Use a dedicated node agent for local infrastructure operations, with only the privileges it needs (a restricted Incus identity for workloads).
 
 # 18. Testing requirements
 
@@ -817,12 +828,13 @@ Acceptance: Install and boot Strata on physical hardware.
 
 ## M2 — VM management
 
-- KVM/QEMU.
-- libvirt provider.
+- Incus on the host, replacing libvirtd.
+- Restricted Strata project and agent identity, proven by tests.
+- Incus provider.
 - VM schema.
 - VM lifecycle.
-- Local storage.
-- Virtual networking.
+- Local storage (Incus storage pools on dedicated disks).
+- Virtual networking (Incus networks declared through NixOS).
 
 Acceptance: Manage VMs through the CLI.
 
@@ -840,10 +852,10 @@ Acceptance: Git changes generate safe and repeatable infrastructure changes.
 
 ## M4 — Containers and storage
 
-- LXC provider.
-- Podman provider.
+- System containers (Incus).
+- OCI application containers (Incus).
 - ZFS.
-- LVM.
+- LVM-thin.
 - Volume management.
 
 Acceptance: Manage VMs and both container types declaratively.
@@ -864,7 +876,7 @@ Acceptance: Manage a standalone hypervisor through both interfaces.
 - Node registration.
 - Remote operations.
 - Cluster inventory.
-- etcd.
+- Cluster coordination (designed in M6).
 - Scheduling.
 - Migration.
 
@@ -953,7 +965,7 @@ Prefer working vertical slices.
 
 For example:
 
-Git configuration → Nix evaluation → VM planning → libvirt execution → state verification.
+Git configuration → Nix evaluation → VM planning → Incus execution → state verification.
 
 A complete working path is more valuable than ten unfinished modules.
 

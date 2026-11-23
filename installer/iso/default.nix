@@ -52,6 +52,8 @@ in
   environment.systemPackages = [
     self.packages.${system}.strata
     pkgs.git
+    # Hashes the optional console password in `strata-install init`.
+    pkgs.mkpasswd
   ];
 
   environment.etc = {

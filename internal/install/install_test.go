@@ -16,10 +16,15 @@ import (
 type fakeRunner struct {
 	cmds []Command
 	fail string
+	// onRun, if set, is called with each command before it "runs".
+	onRun func(Command)
 }
 
 func (f *fakeRunner) Run(_ context.Context, c Command) ([]byte, error) {
 	f.cmds = append(f.cmds, c)
+	if f.onRun != nil {
+		f.onRun(c)
+	}
 	if f.fail != "" && strings.HasSuffix(c.Name, f.fail) {
 		return nil, errors.New("simulated failure")
 	}

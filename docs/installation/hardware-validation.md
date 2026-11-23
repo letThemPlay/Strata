@@ -28,6 +28,13 @@ tested here (ADR-0015). Virtualization is validated at the host level only.
     available (recorded, not required).
 - A disk of at least 16 GiB that may be erased, and a cable on the intended
   management interface.
+- **Boot media:** write the ISO to a USB stick with `dd` (see the
+  [installation guide](README.md#boot-media)). Remote virtual media of an
+  IP KVM may not work (see there).
+- **Other disks on a reused machine:** erase old LVM, ZFS or RAID data on
+  disks you are not installing on, or expect failed units such as
+  `lvm-activate-<vg>.service` (see the
+  [installation guide](README.md#leftover-data-on-other-disks)).
 - An SSH key pair on your workstation, and a way to provide the public key
   to the installer (file on a second USB stick, HTTPS URL, or typing).
 
@@ -56,7 +63,7 @@ Remove the stick and reboot.
 | 2.2 | SSH with your key from the management network | `ssh strata-admin@ADDRESS` works; `sudo -n true` works |
 | 2.3 | Password and root logins are refused | `ssh -o PubkeyAuthentication=no ...` and `ssh root@...` fail |
 | 2.4 | Address and route | `networkctl status INTERFACE`: configured, routable; static or DHCP as answered |
-| 2.5 | Host services | `systemctl --failed` lists nothing; `systemctl is-active strata-agent sshd libvirtd prometheus-node-exporter` |
+| 2.5 | Host services | `systemctl --failed` lists nothing; `systemctl is-active strata-agent sshd libvirtd.socket prometheus-node-exporter`; `sudo virsh -c qemu:///system version` answers (libvirtd is socket-activated and exits after 2 idle minutes, so `libvirtd` itself may be inactive) |
 | 2.6 | Node exporter from the management network only | `curl http://ADDRESS:9100/metrics` works from the management network |
 | 2.7 | Firewall | `sudo nft list ruleset`: ports 22 and 9100 only on the management interface |
 
@@ -67,14 +74,15 @@ Remove the stick and reboot.
 | 3.1 | KVM module and device | `lsmod \| grep -E '^kvm_(intel\|amd)'`; `test -c /dev/kvm` |
 | 3.2 | Hardware report | `sudo cat /var/lib/strata/hardware.json`: `virtualization.extension` is `vmx` or `svm`, `kvmDevice: true`, `firmware.uefi: true`, CPU, memory, disks and NICs match the machine |
 | 3.3 | Microcode loaded | `journalctl -k -b \| grep -i microcode` shows the revision |
-| 3.4 | IOMMU (if enabled in firmware) | `iommuGroups` in the report is greater than 0 |
+| 3.4 | IOMMU (if enabled in firmware) | `iommuGroups` in the report is greater than 0. Known limitation: Strata does not enable the IOMMU on the kernel command line yet, so on Intel it is 0 even with VT-d enabled |
 
 ## 4. Configuration and recovery
 
 | # | Check | Expected |
 |---|---|---|
-| 4.1 | `/etc/nixos` is a clean Git repository with one commit | `git -C /etc/nixos status`, `git -C /etc/nixos log` |
-| 4.2 | It evaluates offline to the running system | `nix eval --offline --raw /etc/nixos#nixosConfigurations.ID.config.system.build.toplevel.outPath` equals `readlink -f /run/current-system` |
+| 4.1 | `/etc/nixos` is a clean Git repository with one commit | `sudo git -C /etc/nixos status`, `sudo git -C /etc/nixos log` (it is owned by root; without `sudo`, Git refuses with "dubious ownership") |
+| 4.2 | It evaluates offline to the running system | `sudo nix eval --offline --raw /etc/nixos#nixosConfigurations.ID.config.system.build.toplevel.outPath` equals `readlink -f /run/current-system` |
+| 4.5 | Console login (if a console password was set) | log in as the admin on the local console |
 | 4.3 | Reboot persistence | after `sudo reboot`: 2.1, 2.2 and 2.5 pass again |
 | 4.4 | Disk layout | `lsblk -f`: ESP (vfat) and root (ext4) only, partition labels `disk-system-ESP` and `disk-system-root` |
 
@@ -85,5 +93,28 @@ to the pull request that records the result.
 
 | Date | Commit | Machine (vendor, model) | CPU | Disk controller | NIC | Result | Notes |
 |---|---|---|---|---|---|---|---|
-| | | | Intel | | | | |
+| 2026-11-23 | ISO from `main` after PR #6 (exact commit not recorded) | Lenovo ThinkServer TS140 | Intel Xeon E3-1225 v3 (VT-x) | SATA (Samsung SSD 860 as system disk) | Intel dual-port (`ens3f0`/`ens3f1`, e1000e) | **Pass** | See below |
 | | | | AMD | | | | |
+
+### Lenovo ThinkServer TS140 (Intel), 2026-11-23
+
+Installed with `strata-install init` from a USB stick, DHCP on `ens3f1`.
+Every check after installation passed (2.2–2.7, 3.1–3.3, 4.1–4.4),
+including reboot persistence. Microcode was updated early
+(`0x17` → `0x28`), and device firmware (Radeon) loaded.
+
+- **1.2:** the old Proxmox disk was unavailable ("in use") because the
+  live system had activated its LVM volume group: correct.
+- **1.3:** the first install selected the wrong port: no port had a link,
+  and the wizard pre-selected the first. The host was unreachable and,
+  without a console password, could only be reinstalled. Fixed after this
+  run: no default without a link, re-scan, optional console password.
+- **1.5:** the first install ran with the network cable unplugged.
+- **1.6:** not run on hardware (covered by the `nixos-installer` VM test).
+- **2.5:** `lvm-activate-pve.service` failed until the leftover Proxmox LVM
+  data on another disk (`sda`) was erased; not a Strata fault.
+- **3.4:** VT-d is enabled in the firmware (DMAR table present), but the
+  kernel does not enable the IOMMU: 0 groups (known limitation).
+- **Boot media:** JetKVM virtual media from its own storage did not work:
+  firmware booted from it, but Linux reset the emulated drive repeatedly
+  and never saw a disk. A USB stick written with `dd` worked.

@@ -26,6 +26,9 @@ type Env struct {
 	HTTP *http.Client
 	// Geteuid returns the effective user ID (os.Geteuid).
 	Geteuid func() int
+	// HashPassword hashes the console password in the init wizard
+	// (HashPassword).
+	HashPassword func(ctx context.Context, password string) (string, error)
 }
 
 // Subcommands returns the strata-install subcommands.
@@ -130,7 +133,10 @@ func runInit(ctx context.Context, env Env, args []string, stdout, stderr io.Writ
 	}
 
 	p := NewPrompter(ctx, env.Stdin, stdout)
-	w := &Wizard{Root: env.Root, P: p, HTTP: env.HTTP, ReadFile: os.ReadFile}
+	if f, ok := env.Stdin.(*os.File); ok {
+		p.SetEcho = TerminalEcho(f)
+	}
+	w := &Wizard{Root: env.Root, P: p, HTTP: env.HTTP, ReadFile: os.ReadFile, HashPassword: env.HashPassword}
 	answers, err := w.Run(ctx)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "\ninit: %v\n", err)

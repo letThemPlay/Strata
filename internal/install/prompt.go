@@ -24,6 +24,9 @@ type Prompter struct {
 	out     io.Writer
 	lines   chan lineResult
 	pending []byte
+	// SetEcho, if set, turns terminal echo on or off around secret
+	// prompts. It is nil when input is not a terminal.
+	SetEcho func(on bool) error
 }
 
 type lineResult struct {
@@ -130,6 +133,20 @@ func (p *Prompter) Ask(question, def string, check func(string) error) (string, 
 		}
 		return answer, nil
 	}
+}
+
+// Secret reads a line without echoing it, if input is a terminal.
+func (p *Prompter) Secret(question string) (string, error) {
+	_, _ = fmt.Fprintf(p.out, "%s: ", question)
+	if p.SetEcho != nil {
+		if err := p.SetEcho(false); err == nil {
+			defer func() {
+				_ = p.SetEcho(true)
+				_, _ = fmt.Fprintln(p.out)
+			}()
+		}
+	}
+	return p.Line()
 }
 
 // Confirm asks a yes/no question.

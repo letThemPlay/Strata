@@ -122,7 +122,11 @@ func (in *Installer) describe(w io.Writer, d DiskInfo) {
 	a := in.Answers
 	var b strings.Builder
 	fmt.Fprintf(&b, "Node:       %s\n", a.Node.ID)
-	fmt.Fprintf(&b, "Admin:      %s (%d key(s))\n", a.Admin.Name, len(a.Admin.AuthorizedKeys))
+	console := "no console password"
+	if a.Admin.ConsolePasswordHash != "" {
+		console = "console password set"
+	}
+	fmt.Fprintf(&b, "Admin:      %s (%d key(s), %s)\n", a.Admin.Name, len(a.Admin.AuthorizedKeys), console)
 	fmt.Fprintf(&b, "Disk:       %s", a.Disk.Device)
 	if d.Name != "" {
 		fmt.Fprintf(&b, " -> /dev/%s, %s", d.Name, FormatBytes(d.SizeBytes))
@@ -140,6 +144,15 @@ func (in *Installer) describe(w io.Writer, d DiskInfo) {
 		b.WriteString("Partitions: (all will be erased)\n")
 		for _, p := range d.Partitions {
 			fmt.Fprintf(&b, "  /dev/%s  %s\n", p.Name, FormatBytes(p.SizeBytes))
+		}
+	}
+	switch {
+	case d.DataUnknown:
+		b.WriteString("Existing data: could not be checked (no udev database)\n")
+	case len(d.ExistingData) > 0:
+		b.WriteString("Existing data: (will be destroyed)\n")
+		for _, e := range d.ExistingData {
+			fmt.Fprintf(&b, "  %s\n", e)
 		}
 	}
 	n := a.Network
@@ -203,6 +216,11 @@ func (in *Installer) Apply(ctx context.Context) error {
 	}
 
 	in.step(5, "Installing the system")
+	// Before nixos-install: the admin account takes its password from
+	// this file when it is created.
+	if err := in.writeConsolePassword(); err != nil {
+		return err
+	}
 	if _, err := in.Runner.Run(ctx, Command{
 		Name:    "nixos-install",
 		Args:    []string{"--root", in.Target, "--system", system, "--no-root-passwd", "--no-channel-copy"},
@@ -313,6 +331,23 @@ func (in *Installer) storeConfiguration(ctx context.Context) error {
 	return git("commit", "--quiet", "--message", "Initial configuration of "+in.Answers.Node.ID+" (strata-install)")
 }
 
+// writeConsolePassword stores the console password hash, if any, in the
+// new system, readable by root only.
+func (in *Installer) writeConsolePassword() error {
+	h := in.Answers.Admin.ConsolePasswordHash
+	if h == "" {
+		return nil
+	}
+	path := filepath.Join(in.Target, ConsolePasswordPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil { //nolint:gosec // /etc/strata is a normal configuration directory.
+		return fmt.Errorf("store the console password: %w", err)
+	}
+	if err := os.WriteFile(path, []byte(h+"\n"), 0o600); err != nil {
+		return fmt.Errorf("store the console password: %w", err)
+	}
+	return nil
+}
+
 // confirm asks the operator to type the device path, unless ConfirmWipe
 // already matches it.
 func (in *Installer) confirm(d DiskInfo) error {
@@ -325,6 +360,9 @@ func (in *Installer) confirm(d DiskInfo) error {
 		return nil
 	}
 	in.say("\nALL DATA ON %s (/dev/%s, %s) WILL BE DESTROYED.", device, d.Name, FormatBytes(d.SizeBytes))
+	for _, e := range d.ExistingData {
+		in.say("  existing data: %s", e)
+	}
 	in.say("Type the device path to confirm, anything else aborts:")
 	line, err := bufio.NewReader(in.Stdin).ReadString('\n')
 	if err != nil && !errors.Is(err, io.EOF) {

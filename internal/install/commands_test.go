@@ -11,9 +11,10 @@ import (
 	"github.com/letthemplay/Strata/internal/cli"
 )
 
-// initInput answers the wizard for wizardFS with DHCP on eno1.
+// initInput answers the wizard for wizardFS with DHCP on eno1 and no
+// console password.
 func initInput(extra ...string) string {
-	return lines(append([]string{"hv-08", "", "1", testKey, "", "", "", "", "1"}, extra...)...)
+	return lines(append([]string{"hv-08", "", "1", testKey, "", "", "", "", "", "1"}, extra...)...)
 }
 
 func runInitCmd(t *testing.T, env Env, args ...string) (int, string, string) {

@@ -25,11 +25,12 @@ func run() int {
 		Name:    "strata-install",
 		Summary: "Strata host installer",
 		Subcommands: install.Subcommands(install.Env{
-			Root:    os.DirFS("/"),
-			Stdin:   os.Stdin,
-			Runner:  install.ExecRunner{Stderr: os.Stderr},
-			HTTP:    install.NewKeyClient(),
-			Geteuid: os.Geteuid,
+			Root:         os.DirFS("/"),
+			Stdin:        os.Stdin,
+			Runner:       install.ExecRunner{Stderr: os.Stderr},
+			HTTP:         install.NewKeyClient(),
+			Geteuid:      os.Geteuid,
+			HashPassword: install.HashPassword,
 		}),
 	}
 	return cmd.Run(ctx, os.Args[1:], os.Stdout, os.Stderr)

@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"slices"
+	"strconv"
 	"strings"
 )
 
@@ -21,7 +22,13 @@ type Wizard struct {
 	HTTP *http.Client
 	// ReadFile reads key files (os.ReadFile).
 	ReadFile func(name string) ([]byte, error)
+	// HashPassword returns the crypt(3) hash of a password (HashPassword
+	// in this package, which runs mkpasswd).
+	HashPassword func(ctx context.Context, password string) (string, error)
 }
+
+// minConsolePassword is the shortest accepted console password.
+const minConsolePassword = 8
 
 // Run asks all questions and returns validated answers.
 func (w *Wizard) Run(ctx context.Context) (Answers, error) {
@@ -38,6 +45,9 @@ func (w *Wizard) Run(ctx context.Context) (Answers, error) {
 		return Answers{}, err
 	}
 	if a.Admin.AuthorizedKeys, err = w.keys(ctx, a.Admin.Name); err != nil {
+		return Answers{}, err
+	}
+	if a.Admin.ConsolePasswordHash, err = w.consolePassword(ctx, a.Admin.Name); err != nil {
 		return Answers{}, err
 	}
 	if a.Disk.Device, err = w.disk(); err != nil {
@@ -156,6 +166,46 @@ func (w *Wizard) keys(ctx context.Context, admin string) ([]string, error) {
 	}
 }
 
+// consolePassword asks for an optional console password and returns its
+// hash, or "" for none. The password itself is never stored.
+func (w *Wizard) consolePassword(ctx context.Context, admin string) (string, error) {
+	p := w.P
+	p.Say("\nOptional console password for %s. It allows logging in on the local console", admin)
+	p.Say("(or through a remote KVM) to recover when the network is unreachable. SSH never")
+	p.Say("accepts passwords. Leave it empty for none; recovery then requires the installer.")
+	for {
+		pw, err := p.Secret("Console password")
+		if err != nil {
+			return "", err
+		}
+		if pw == "" {
+			p.Say("  no console password")
+			return "", nil
+		}
+		if len([]rune(pw)) < minConsolePassword {
+			p.Say("  use at least %d characters", minConsolePassword)
+			continue
+		}
+		again, err := p.Secret("Repeat it")
+		if err != nil {
+			return "", err
+		}
+		if again != pw {
+			p.Say("  the passwords differ")
+			continue
+		}
+		h, err := w.HashPassword(ctx, pw)
+		if err != nil {
+			return "", fmt.Errorf("hash the console password: %w", err)
+		}
+		if !passwordHashPattern.MatchString(h) {
+			return "", errors.New("hash the console password: unexpected output from the hashing tool")
+		}
+		p.Say("  console password set (only its hash is kept)")
+		return h, nil
+	}
+}
+
 func (w *Wizard) disk() (string, error) {
 	p := w.P
 	disks, err := DiskCandidates(w.Root)
@@ -182,6 +232,9 @@ func (w *Wizard) disk() (string, error) {
 		if n := len(d.Info.Partitions); n > 0 {
 			desc += fmt.Sprintf(", %d partition(s)", n)
 		}
+		if len(d.Info.ExistingData) > 0 {
+			desc += ", HAS EXISTING DATA"
+		}
 		items[i] = desc
 		if d.Problem != nil {
 			disabled[i] = d.Problem.Error()
@@ -193,10 +246,27 @@ func (w *Wizard) disk() (string, error) {
 	if usable > 1 {
 		def = -1 // Make the operator choose.
 	}
-	p.Say("")
-	i, err := p.Choose("System disk (it will be erased completely):", items, disabled, def)
-	if err != nil {
-		return "", err
+	var i int
+	for {
+		p.Say("")
+		if i, err = p.Choose("System disk (it will be erased completely):", items, disabled, def); err != nil {
+			return "", err
+		}
+		data := disks[i].Info.ExistingData
+		if len(data) == 0 {
+			break
+		}
+		p.Say("  %s contains existing data that will be destroyed:", disks[i].Device)
+		for _, e := range data {
+			p.Say("    %s", e)
+		}
+		erase, err := p.Confirm("Erase this data?", false)
+		if err != nil {
+			return "", err
+		}
+		if erase {
+			break
+		}
 	}
 	if !disks[i].Stable() {
 		p.Say("  note: %s has no /dev/disk/by-id/ name; its name may change between boots.", disks[i].Device)
@@ -206,27 +276,11 @@ func (w *Wizard) disk() (string, error) {
 
 func (w *Wizard) network() (Network, error) {
 	p := w.P
-	nics, err := InterfaceCandidates(w.Root)
+	name, err := w.managementInterface()
 	if err != nil {
 		return Network{}, err
 	}
-	if len(nics) == 0 {
-		return Network{}, errors.New("no network interface found")
-	}
-	items := make([]string, len(nics))
-	def := 0
-	for i, n := range nics {
-		items[i] = fmt.Sprintf("%-15s %s  link %s", n.Name, n.MACAddress, n.OperState)
-		if n.OperState == "up" && nics[def].OperState != "up" {
-			def = i
-		}
-	}
-	p.Say("")
-	i, err := p.Choose("Management network interface:", items, nil, def)
-	if err != nil {
-		return Network{}, err
-	}
-	n := Network{Interface: nics[i].Name}
+	n := Network{Interface: name}
 
 	mode, err := p.Choose("Addressing:", []string{"DHCP", "static"}, nil, 0)
 	if err != nil {
@@ -258,6 +312,68 @@ func (w *Wizard) network() (Network, error) {
 		return Network{}, err
 	}
 	return n, nil
+}
+
+// managementInterface asks for the management interface. An interface
+// with a link is the default; without any link there is no default, and
+// an empty answer re-scans, so the operator can connect the cable to
+// identify the port. Only this interface is configured on the installed
+// host: the others stay down.
+func (w *Wizard) managementInterface() (string, error) {
+	p := w.P
+	for {
+		nics, err := InterfaceCandidates(w.Root)
+		if err != nil {
+			return "", err
+		}
+		if len(nics) == 0 {
+			return "", errors.New("no network interface found")
+		}
+		items := make([]string, len(nics))
+		def := -1
+		for i, n := range nics {
+			state := "no link"
+			if n.OperState == "up" {
+				state = "link up"
+				if def < 0 {
+					def = i
+				}
+			}
+			items[i] = fmt.Sprintf("%-15s %s  %s", n.Name, n.MACAddress, state)
+		}
+		p.Say("")
+		if def >= 0 {
+			i, err := p.Choose("Management network interface (the only one configured on the host):", items, nil, def)
+			if err != nil {
+				return "", err
+			}
+			return nics[i].Name, nil
+		}
+
+		p.Say("Management network interface (the only one configured on the host):")
+		for i, item := range items {
+			p.Say("  %d) %s", i+1, item)
+		}
+		p.Say("No interface has a link. Connect the management cable and press Enter to")
+		p.Say("re-scan, so that the right port shows \"link up\"; or choose a number.")
+		answer, err := p.Ask("Choice (Enter to re-scan)", "", func(s string) error {
+			if s == "" {
+				return nil
+			}
+			if n, err := strconv.Atoi(s); err != nil || n < 1 || n > len(nics) {
+				return errors.New("enter a number from the list, or nothing to re-scan")
+			}
+			return nil
+		})
+		if err != nil {
+			return "", err
+		}
+		if answer == "" {
+			continue
+		}
+		n, _ := strconv.Atoi(answer)
+		return nics[n-1].Name, nil
+	}
 }
 
 // list asks for space- or comma-separated values.

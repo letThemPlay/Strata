@@ -20,7 +20,10 @@ hardware has not been validated yet. The procedure for that is in
 ```sh
 nix build github:letThemPlay/Strata#iso
 sudo dd if=result/iso/strata-installer-*.iso of=/dev/sdX bs=4M status=progress conv=fsync
+sudo blkid /dev/sdX    # LABEL="nixos-strata-..." TYPE="iso9660"
 ```
+
+See [boot media](#boot-media) for what does not work.
 
 ## 2. Boot the installer
 
@@ -48,11 +51,27 @@ The wizard asks for:
   Each key is shown with its SHA256 fingerprint. Compare it with
   `ssh-keygen -lf ~/.ssh/id_ed25519.pub` on your workstation before you
   accept it.
+- an optional **console password** for the administrator (typed twice, not
+  shown). It works only for logging in on the local console, physically or
+  through a remote KVM, to recover when the host cannot be reached over the
+  network; SSH never accepts passwords. Only its hash is kept, in
+  `/etc/strata/admin-console-password` on the host (root-only, not in the
+  configuration repository). Without one, a host with a broken network
+  configuration can only be repaired by booting the installer. With
+  passwordless sudo, the console password is root-equivalent, like the
+  SSH keys.
 - the **system disk**, chosen from the machine's whole disks, listed by
   their stable `/dev/disk/by-id/` names. Disks that are too small or in use
-  (such as the installation USB stick) are shown as unavailable.
+  (such as the installation USB stick) are shown as unavailable. Disks
+  with existing data (filesystems, ZFS, LVM or RAID members) are marked
+  `HAS EXISTING DATA`; choosing one lists what it holds and asks before it
+  is erased.
 - the **management interface**, and DHCP or static addressing (addresses
-  with prefix length, gateways, DNS servers).
+  with prefix length, gateways, DNS servers). It is the **only interface
+  configured** on the installed host; the others stay down (no link lights).
+  Connect the management cable before you choose: an interface with a link
+  is the default, and if none has one, the wizard asks you to connect the
+  cable and press Enter to re-scan.
 
 It writes `answer.json` (`--output FILE` to choose another name; it does not
 overwrite an existing file without `--force`), shows the plan (below) and
@@ -130,3 +149,47 @@ sudo git push -u origin main
 
 The configuration pins the Strata and nixpkgs revisions of the ISO you
 installed with. Update them with `nix flake update` in your repository.
+
+## Troubleshooting
+
+### Boot media
+
+- **Write the ISO raw** (`dd`, or Rufus in "DD image mode", or
+  balenaEtcher). Tools that unpack the ISO onto a FAT filesystem (Rufus "ISO
+  image mode") or boot it through their own loader (Ventoy) lose its
+  filesystem label, and boot stops with "Timed out waiting for device
+  /dev/disk/by-label/nixos-strata-...".
+- **Remote virtual media of IP KVMs may not work.** With JetKVM, the
+  firmware booted the ISO from JetKVM's own storage, but Linux reset the
+  emulated drive repeatedly and never saw a disk, with the same timeout.
+  The cause is not known yet; use a USB stick in the machine.
+
+### The host is not reachable after installation
+
+Check that the cable is in the management interface chosen during
+installation: only that interface is configured, the others stay down. On
+the console, `networkctl list` shows which one is configured.
+
+- **Move the cable** to the configured interface; or
+- **log in on the console** with the console password, if you set one, and
+  correct `strata.networking.management` in `/etc/nixos/host.nix`. The host
+  is offline, so bring the cabled interface up by hand first, e.g.
+  `sudo ip link set eno2 up && sudo ip addr add 192.0.2.10/24 dev eno2 &&
+  sudo ip route add default via 192.0.2.1`, then
+  `sudo nixos-rebuild switch --flake /etc/nixos`, which downloads what it
+  needs to rebuild, and commit the change;
+- without a console password, boot the installer and install again.
+
+### Leftover data on other disks
+
+On a reused machine, old data on disks you did not install on is still
+there. LVM volume groups on them are activated automatically at boot, and
+fail if they are incomplete or use features the host lacks (Proxmox's
+`pve` group fails with `lvm-activate-pve.service`). ZFS pools are not
+imported (Strata does not enable ZFS). Erase disks you do not need, after
+checking with `lsblk -f` which disk is which:
+
+```sh
+sudo vgchange -an VG                       # if an LVM group is active
+sudo wipefs --all /dev/sdX2 /dev/sdX1 /dev/sdX   # partitions first, then the disk
+```

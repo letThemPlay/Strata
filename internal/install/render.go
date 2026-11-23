@@ -41,6 +41,11 @@ func RenderHostNix(a Answers) string {
 	w(2, "access.admin = {")
 	w(3, "name = %s;", nixString(a.Admin.Name))
 	list(3, "authorizedKeys", a.Admin.AuthorizedKeys)
+	if a.Admin.ConsolePasswordHash != "" {
+		// The hash itself stays out of the configuration (and its Git
+		// repository); the installer writes it to this root-only file.
+		w(3, "consolePasswordFile = %s;", nixString(ConsolePasswordPath))
+	}
 	w(2, "};")
 	b.WriteByte('\n')
 	w(2, "disk = {")

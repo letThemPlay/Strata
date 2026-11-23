@@ -42,6 +42,23 @@ in
         example = [ "ssh-ed25519 AAAAC3Nza... admin@workstation" ];
         description = "SSH public keys allowed to log in as the administrator. At least one is required.";
       };
+
+      consolePasswordFile = mkOption {
+        type = types.nullOr (types.strMatching "/.+");
+        default = null;
+        example = "/etc/strata/admin-console-password";
+        description = ''
+          File holding the crypt(3) hash of a password for logging in as
+          the administrator on the local console, for recovery when the
+          network is unreachable. SSH never accepts passwords.
+
+          The file must be readable by root only and must not be in the Nix
+          store or the host's Git repository. It is read when the account is
+          created; later, change the password with `sudo passwd ADMIN` or
+          lock it with `sudo passwd -l ADMIN`.
+          `null` (the default): the account has no password.
+        '';
+      };
     };
   };
 
@@ -60,10 +77,16 @@ in
     users.users.${acfg.admin.name} = {
       isNormalUser = true;
       extraGroups = [ "wheel" ];
-      # Locked: no password login is possible.
-      hashedPassword = "!";
       openssh.authorizedKeys.keys = acfg.admin.authorizedKeys;
-    };
+    }
+    // (
+      if acfg.admin.consolePasswordFile == null then
+        # Locked: no password login is possible.
+        { hashedPassword = "!"; }
+      else
+        # Console login only: SSH password authentication is disabled below.
+        { hashedPasswordFile = acfg.admin.consolePasswordFile; }
+    );
 
     security.sudo.extraRules = [
       {

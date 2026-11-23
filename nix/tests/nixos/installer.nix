@@ -101,6 +101,15 @@ pkgs.testers.runNixOSTest {
     expected = json.loads('${builtins.toJSON answers}')
     expected["network"]["interface"] = nic
     installer.succeed("echo '${keys.snakeOilEd25519PublicKey}' > /tmp/admin.pub")
+    console_password = "strata-console-test"
+
+    # Leftover data on the target disk, as on a reused machine: the
+    # installer must show it and ask before erasing it.
+    installer.succeed(
+        "echo 'type=linux' | sfdisk --quiet --label gpt /dev/vda",
+        "mkfs.ext4 -q -L olddata /dev/vda1",
+        "udevadm settle",
+    )
 
     def wizard_input(*extra):
         """Answers to strata-install init on this VM, then extra lines."""
@@ -108,7 +117,8 @@ pkgs.testers.runNixOSTest {
             "hv-07",           # node ID
             "",                # admin account: default
             "2", "/tmp/admin.pub", "y", "n",  # keys from a file; use them; no more
-            "",                # disk: the only usable one is the default
+            console_password, console_password,  # console password, twice
+            "", "y",           # disk: the only usable one; erase its existing data
             "",                # interface: the only one
             "1",               # DHCP
             *extra,
@@ -119,14 +129,20 @@ pkgs.testers.runNixOSTest {
         wizard_input("n")  # do not install now
         out = run(installer, "strata-install init --output /tmp/answer.json < /tmp/wizard.in")
         assert "virtio-strata-target" in out and "Install now?" in out, out
+        assert "HAS EXISTING DATA" in out and '/dev/vda1: ext4 "olddata"' in out, out
+        assert console_password not in out, "the console password was echoed"
         written = json.loads(installer.succeed("cat /tmp/answer.json"))
+        console_hash = written["admin"].pop("consolePasswordHash")
+        assert console_hash.startswith("$y$"), console_hash
         assert written == expected, f"{written} != {expected}"
         installer.fail("strata-install init --output /tmp/answer.json < /tmp/wizard.in")
 
     with subtest("plan describes the installation"):
         out = run(installer, "strata-install plan /tmp/answer.json")
         assert "virtio-strata-target -> /dev/vda, 20.0 GiB" in out, out
-        assert "Partitions: none" in out, out
+        assert "Partitions: (all will be erased)" in out, out
+        assert 'Existing data: (will be destroyed)\n  /dev/vda1: ext4 "olddata"' in out, out
+        assert "console password set" in out, out
 
     with subtest("plan rejects an invalid answer file"):
         installer.succeed("sed 's/hv-07/HV_07/' /tmp/answer.json > /tmp/bad.json")
@@ -141,7 +157,7 @@ pkgs.testers.runNixOSTest {
             print(installer.execute("for f in /tmp/strata-host-*/*.nix; do echo \"=== $f\"; cat \"$f\"; done")[1])
         assert status != 0, "apply succeeded with a mismatched confirmation"
         assert "nothing was changed" in out, out
-        installer.succeed("test -z \"$(wipefs --no-act --noheadings /dev/vda)\"")
+        installer.succeed("test \"$(blkid -o value -s LABEL /dev/vda1)\" = olddata")
 
     with subtest("init installs the host after the typed confirmation"):
         wizard_input("y", "/dev/disk/by-id/virtio-strata-target")
@@ -180,10 +196,22 @@ pkgs.testers.runNixOSTest {
         installed.succeed("test -n \"$(ls /run/current-system/firmware/)\"")
 
     with subtest("Strata host services run"):
-        for unit in ["strata-agent.service", "sshd.service", "libvirtd.service",
+        for unit in ["strata-agent.service", "sshd.service", "libvirtd.socket",
                      "prometheus-node-exporter.service"]:
             installed.wait_for_unit(unit)
+        # libvirtd is socket-activated and exits when idle (--timeout 120).
+        installed.succeed("virsh -c qemu:///system version")
         installed.succeed("grep -q '${keys.snakeOilEd25519PublicKey}' /etc/ssh/authorized_keys.d/strata-admin")
+
+    with subtest("the admin can log in on the console with the console password"):
+        # The hash is root-only and not part of the configuration repository.
+        installed.succeed("test \"$(stat -c %a:%U /etc/strata/admin-console-password)\" = 600:root")
+        installed.succeed("! git -C /etc/nixos grep -q '\\$y\\$'")
+        installed.wait_until_tty_matches("1", "login: ")
+        installed.send_chars("strata-admin\n")
+        installed.wait_until_tty_matches("1", "Password: ")
+        installed.send_chars(f"{console_password}\n")
+        installed.wait_until_succeeds("pgrep -u strata-admin -t tty1 bash", timeout=60)
 
     with subtest("/etc/nixos is a Git repository that reproduces the running system"):
         installed.succeed("test \"$(git -C /etc/nixos rev-list --count HEAD)\" = 1")

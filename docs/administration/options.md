@@ -96,15 +96,17 @@ but never started; guest networking will be managed by Strata (M2).
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `strata.access.enable` | bool | `false` | Enable key-only SSH for the admin account. |
-| `strata.access.admin.name` | POSIX user name, not `root` | `"strata-admin"` | Administrator account (member of `wheel`, password locked). |
+| `strata.access.admin.name` | POSIX user name, not `root` | `"strata-admin"` | Administrator account (member of `wheel`; password locked unless a console password is set). |
 | `strata.access.admin.authorizedKeys` | list of OpenSSH public keys | `[ ]` | Keys allowed to log in as the admin. At least one is required. |
+| `strata.access.admin.consolePasswordFile` | null or absolute path | `null` | File with the crypt(3) hash of a password for **local console** login, for recovery when the network is unreachable. Root-only, outside the Nix store and the configuration repository (the installer uses `/etc/strata/admin-console-password`). Read when the account is created; later use `sudo passwd <admin>` or `sudo passwd -l <admin>`. SSH never accepts passwords. |
 
 sshd is configured with `PasswordAuthentication no`,
 `KbdInteractiveAuthentication no`, `PermitRootLogin no`, `X11Forwarding no`
 and `AllowUsers <admin>` (override with `mkForce` if more users need SSH).
 
 > **Warning:** the admin has passwordless sudo, because password
-> authentication is disabled. Its SSH keys are therefore root-equivalent.
+> authentication is disabled. Its SSH keys, and its console password if
+> one is set, are therefore root-equivalent.
 > Protect them accordingly (hardware keys via `sk-ssh-ed25519@openssh.com`
 > are supported).
 

@@ -26,6 +26,14 @@ type DiskInfo struct {
 	Model      string
 	Removable  bool
 	Partitions []Partition
+	// ExistingData describes filesystems and volume or pool memberships
+	// found on the disk or its partitions, e.g. `/dev/sdd1: zfs_member
+	// "tank"`. They are not in use (Probe rejects those), but erasing them
+	// destroys their data.
+	ExistingData []string
+	// DataUnknown is set when existing data could not be checked (no udev
+	// database).
+	DataUnknown bool
 }
 
 // Partition is an existing partition on the target disk.
@@ -76,6 +84,7 @@ func probeDisk(root fs.FS, report hardware.Report, device string) (DiskInfo, err
 	if info.Partitions, err = partitions(root, name); err != nil {
 		return info, fmt.Errorf("disk.device: %w", err)
 	}
+	info.ExistingData, info.DataUnknown = existingData(root, name, info.Partitions)
 
 	var errs []error
 	if d.SizeBytes < MinDiskBytes {
@@ -157,6 +166,53 @@ func partitions(root fs.FS, name string) ([]Partition, error) {
 		parts = append(parts, p)
 	}
 	return parts, nil
+}
+
+// existingData lists the filesystem and membership signatures that udev
+// found (with blkid) on disk name and its partitions. It reports unknown
+// if there is no udev database.
+func existingData(root fs.FS, name string, parts []Partition) ([]string, bool) {
+	if _, err := fs.Stat(root, "run/udev/data"); err != nil {
+		return nil, true
+	}
+	var found []string
+	for _, dev := range append([]string{name}, partitionNames(parts)...) {
+		sysDir := "sys/block/" + name
+		if dev != name {
+			sysDir += "/" + dev
+		}
+		num, err := fs.ReadFile(root, sysDir+"/dev")
+		if err != nil {
+			continue
+		}
+		props := udevProperties(root, "run/udev/data/b"+strings.TrimSpace(string(num)))
+		fsType := props["ID_FS_TYPE"]
+		if fsType == "" {
+			continue
+		}
+		desc := "/dev/" + dev + ": " + fsType
+		if label := props["ID_FS_LABEL"]; label != "" {
+			desc += fmt.Sprintf(" %q", label)
+		}
+		found = append(found, desc)
+	}
+	return found, false
+}
+
+// udevProperties reads the E: (property) lines of a udev database file.
+func udevProperties(root fs.FS, file string) map[string]string {
+	props := map[string]string{}
+	data, err := fs.ReadFile(root, file)
+	if err != nil {
+		return props
+	}
+	for _, line := range strings.Split(string(data), "\n") {
+		rest, isProperty := strings.CutPrefix(line, "E:")
+		if k, v, ok := strings.Cut(rest, "="); isProperty && ok {
+			props[k] = v
+		}
+	}
+	return props
 }
 
 func partitionNames(parts []Partition) []string {

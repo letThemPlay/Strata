@@ -1,8 +1,8 @@
 # Strata
 
 Strata is a declarative, bare-metal virtualization platform built on NixOS.
-Infrastructure is described in Nix, stored in Git, and reconciled onto KVM/QEMU
-(libvirt), LXC and Podman workloads.
+Infrastructure is described in Nix, stored in Git, and reconciled onto VMs
+and containers managed by Incus (KVM/QEMU, LXC and OCI application containers).
 
 > **Status: milestone M1 complete** (validated on Intel and AMD
 > hardware). The repository contains the build, development environment,
@@ -11,7 +11,7 @@ Infrastructure is described in Nix, stored in Git, and reconciled onto KVM/QEMU
 > configuration template, an offline installer ISO with an interactive
 > installer and a hardware-discovery agent, all tested in VMs. There is no
 > VM, container, configuration or management functionality yet; the
-> workload backend is still being decided (ADR-0015).
+> workload backend is Incus (ADR-0015); integration starts in M2.
 > See [ARCHITECTURE.md](ARCHITECTURE.md#current-status).
 
 ## Quick start

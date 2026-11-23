@@ -4,8 +4,8 @@ Strata is a declarative, bare-metal virtualization platform built on NixOS.
 Infrastructure is described in Nix, stored in Git, and reconciled onto KVM/QEMU
 (libvirt), LXC and Podman workloads.
 
-> **Status: milestone M1 implemented; physical hardware validation
-> pending.** The repository contains the build, development environment,
+> **Status: milestone M1 complete** (validated on Intel and AMD
+> hardware). The repository contains the build, development environment,
 > NixOS modules for a hypervisor host (SSH access, management networking,
 > monitoring, system disk layout, libvirtd as a host service), a host
 > configuration template, an offline installer ISO with an interactive

@@ -1,6 +1,7 @@
 # Strata Architecture
 
-**Status:** Milestone M1 in progress (slices 1–2 complete). This document describes the target
+**Status:** Milestone M1 complete; M2 not started (the workload backend
+decision, ADR-0015, comes first). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
 
@@ -127,7 +128,7 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | `strata.disk` (disko ext4 layout, systemd-boot, UEFI), host flake template, reference host | **Implemented** (M1 slice 3, experimental) |
 | Installer ISO and `strata-install plan/apply` (answer file, offline install) | **Implemented** (M1 slice 4a, experimental) |
 | `strata-install init` (interactive answer file wizard) | **Implemented** (M1 slice 4b, experimental) |
-| Physical hardware validation | **In progress** (M1 slice 5): Intel (Lenovo ThinkServer TS140) **passed**; AMD pending. See [results](docs/installation/hardware-validation.md#results) |
+| Physical hardware validation | **Passed** (M1 slice 5): Intel (Lenovo ThinkServer TS140) and AMD (GMKtec M6 Ultra). See [results](docs/installation/hardware-validation.md#results) |
 | VM management | Planned (M2); workload backend under evaluation (libvirt/LXC/Podman or Incus, [ADR-0015](#adr-0015-workload-backend-under-evaluation-incus)) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
 | Containers (LXC, OCI), ZFS, LVM | Planned (M4); backend under evaluation ([ADR-0015](#adr-0015-workload-backend-under-evaluation-incus)) |
@@ -162,26 +163,24 @@ M1 ("install and boot Strata on physical hardware") is delivered in slices:
    written; the `nixos-installer` test builds what a physical install builds
    (redistributable firmware, microcode). **Intel passed** (ThinkServer
    TS140, 2026-11-23); its findings led to the console password, the
-   existing-data warning and the management interface fix. **Pending: one
-   AMD machine.**
+   existing-data warning and the management interface fix. **AMD passed**
+   (GMKtec M6 Ultra, 2026-11-23), including those fixes. **Done.**
 
 ### M1 status
 
-Everything except the acceptance run on physical hardware is done and
-passes in VMs. **M1 is not accepted until the
-[hardware validation](docs/installation/hardware-validation.md) passes on
-at least one Intel and one AMD machine.** Intel has passed; AMD is
-pending. No workload management (libvirt,
+**M1 is complete.** Everything passes in VMs, and the
+[hardware validation](docs/installation/hardware-validation.md) passed on
+one Intel and one AMD machine. No workload management (libvirt,
 LXC, Podman, Incus) exists: the agent and the Go code contain none, and on
 a host libvirtd runs as a host service only, unused by Strata.
 
 Known limitations at the end of M1:
 
-- **Validated on one physical machine (Intel) so far**; AMD pending.
+- Validated on two physical machines (one Intel, one AMD).
 - The IOMMU is not enabled on the kernel command line, so on Intel there
-  are no IOMMU groups even with VT-d enabled. Needed later for PCI
-  passthrough and DMA protection; a host-level, backend-independent
-  setting (proposed: a `strata.compute` option, on by default).
+  are no IOMMU groups even with VT-d enabled (AMD-Vi is on by default).
+  Needed later for PCI passthrough and DMA protection; a host-level,
+  backend-independent setting (proposed: a `strata.compute` option, on by default).
 - Installing from remote IP KVM virtual media (JetKVM) did not work; use a
   USB stick.
 - On reused machines, LVM groups on other disks are activated

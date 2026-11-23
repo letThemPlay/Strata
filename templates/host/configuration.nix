@@ -11,7 +11,7 @@
 
     agent.enable = true;
 
-    # libvirt with KVM-accelerated, unprivileged QEMU.
+    # Incus (QEMU/KVM VMs, LXC containers) with a restricted Strata project.
     compute.enable = true;
 
     # Key-only SSH for the admin account, which has passwordless sudo.

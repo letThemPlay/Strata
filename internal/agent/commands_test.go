@@ -98,6 +98,8 @@ func TestRunCommandFailures(t *testing.T) {
 		{"unwritable state dir", []string{"run", "--state-dir", missing}, cli.ExitError},
 		{"invalid interval", []string{"run", "--interval", "soon"}, cli.ExitUsage},
 		{"negative interval", []string{"run", "--state-dir", missing, "--interval", "-1s"}, cli.ExitError},
+		{"incus address without credentials", []string{"run", "--incus-address", "127.0.0.1:8443"}, cli.ExitUsage},
+		{"incus credentials without address", []string{"run", "--incus-credentials", missing}, cli.ExitUsage},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -107,5 +109,32 @@ func TestRunCommandFailures(t *testing.T) {
 				t.Errorf("exit = %d, want %d", code, tc.wantCode)
 			}
 		})
+	}
+}
+
+// With Incus flags, an unusable identity is reported in backend.json; the
+// agent keeps running.
+func TestRunCommandWithIncus(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan int, 1)
+	go func() {
+		done <- agentCmd(hostFS()).Run(ctx, []string{
+			"run", "--state-dir", dir, "--incus-address", "127.0.0.1:1",
+			"--incus-credentials", filepath.Join(dir, "no-credentials"),
+		}, io.Discard, io.Discard)
+	}()
+
+	path := filepath.Join(dir, BackendStatusFile)
+	waitFor(t, func() bool { _, err := os.Stat(path); return err == nil })
+	cancel()
+	if code := <-done; code != cli.ExitOK {
+		t.Errorf("exit = %d, want %d", code, cli.ExitOK)
+	}
+	st := readStatus(t, path)
+	if st.Backend != "incus" || st.Reachable || !strings.Contains(st.Error, "load client identity") {
+		t.Errorf("status: %+v", st)
 	}
 }

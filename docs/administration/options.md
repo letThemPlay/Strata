@@ -74,21 +74,45 @@ Every `strata.<module>.enable` below requires `strata.enable`.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `strata.agent.enable` | bool | `false` | Run `strata-agent.service` (hardware discovery). Unprivileged, no network access. |
+| `strata.agent.enable` | bool | `false` | Run `strata-agent.service` (hardware discovery; on a compute host also the workload backend status). Unprivileged; no network access, except loopback to the Incus API on a compute host. |
 
 ## Compute
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `strata.compute.enable` | bool | `false` | Enable libvirtd with host-architecture QEMU (`qemu_kvm`). QEMU runs as the unprivileged `qemu-libvirtd` user, swtpm is available, and guests are shut down cleanly when the host shuts down. |
+| `strata.compute.enable` | bool | `false` | Run Incus (`incus-lts`), which manages QEMU/KVM VMs and LXC containers. Enables the nftables firewall, which Incus requires. libvirt is not installed. |
+| `strata.compute.incus.project` | string | `"strata"` | Incus project for Strata's workloads: lowercase letters, digits and hyphens, starting with a letter; not `"default"`. |
+
+What `strata.compute` sets up:
+
+- **The Incus API listens on `127.0.0.1:8443` only.** It is not opened on any
+  interface, and the Incus web UI is not enabled. Administrators use
+  `sudo incus` on the host (Unix socket, root).
+- **A restricted project** (`strata.compute.incus.project`). Its
+  configuration is enforced by `strata-incus-setup.service` on every boot:
+  changes made with `incus project set` are reverted. Instances in it must be
+  unprivileged; nesting, syscall interception, `raw.*` and other low-level
+  settings, disks not backed by a storage pool, and GPU, PCI, USB,
+  Infiniband, unix-char, unix-block, unix-hotplug and proxy devices are
+  refused. NICs must use Incus-managed networks. Snapshots and backups are
+  blocked until the storage slice.
+- **The agent's identity** (with `strata.agent.enable`): a key and
+  certificate generated on the host in `/var/lib/strata-incus/` (root only,
+  never in Git), trusted by Incus as `strata-agent`, restricted to the
+  project. The agent reads them as systemd credentials and reports in
+  `/var/lib/strata/backend.json` whether Incus is reachable and trusts it.
+  It never uses the Incus Unix socket (ADR-0017).
+- **No storage pools and no networks yet.** Instances cannot be created until
+  a storage pool exists; pools on dedicated disks and guest networks come in
+  later M2 slices.
+- Restarting `incus.service` does not stop instances.
 
 KVM modules are not configured: udev loads `kvm-intel` or `kvm-amd` from the
-CPU's features. libvirt's built-in `default` NAT network is defined by NixOS
-but never started; guest networking will be managed by Strata (M2).
+CPU's features.
 
-> **Will change in M2.** Incus is the workload backend; the first M2 slice
-> replaces libvirtd with Incus in `strata.compute`. See
-> [ADR-0015](../../ARCHITECTURE.md#adr-0015-incus-is-the-workload-backend).
+> **Upgrading a host installed before M2:** after `nix flake update` and
+> `nixos-rebuild switch`, libvirtd is gone and Incus starts. M1 hosts have no
+> workloads; `/var/lib/libvirt` is left behind and can be deleted.
 
 ## Access
 
@@ -175,7 +199,8 @@ evaluation. systemd-boot keeps at most 10 generations
 
 - `checks.<system>.module-eval`: option validation, assertions and generated configuration.
 - `checks.<system>.nixos-agent`: VM test of the agent.
-- `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, libvirt, KVM).
+- `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, Incus, KVM).
+- `checks.<system>.nixos-incus`: VM test of Incus and the agent's restricted identity (allowed and refused operations, loopback-only API, configuration enforcement).
 - `checks.<system>.reference-host`: builds the reference host (the `host` template plus test values).
 - `checks.x86_64-linux.nixos-install-ext4`: formats an empty disk with the `ext4` layout, installs the reference host and boots it under UEFI.
 - `checks.x86_64-linux.nixos-installer`: installs a host with the installer ISO, offline, and boots it.

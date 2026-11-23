@@ -18,6 +18,8 @@ pkgs.testers.runNixOSTest {
     hv01 = {
       imports = [ self.nixosModules.default ];
 
+      environment.systemPackages = [ pkgs.jq ];
+
       virtualisation = {
         vlans = [
           1
@@ -101,12 +103,12 @@ pkgs.testers.runNixOSTest {
         print(hv01.execute("systemctl list-jobs --no-pager")[1])
         print("=== hv01: sessions ===")
         print(hv01.execute("loginctl list-sessions --no-pager; ps -eo pid,etimes,stat,cmd | grep -E 'sshd|sudo|systemd --user' | grep -v grep")[1])
-        print("=== hv01: journal (sshd, logind, user managers, firewall, libvirtd, networkd) ===")
+        print("=== hv01: journal (sshd, logind, user managers, firewall, incus, networkd) ===")
         print(
             hv01.execute(
                 "journalctl -b --no-pager -o short-monotonic"
                 " -u sshd.service -u 'sshd@*' -u systemd-logind.service -u 'user@*'"
-                " -u nftables.service -u libvirtd.service -u systemd-networkd.service"
+                " -u nftables.service -u incus.service -u systemd-networkd.service"
                 " | tail -n 200"
             )[1]
         )
@@ -164,26 +166,24 @@ pkgs.testers.runNixOSTest {
         outsider.fail(f"nc -z -w 3 {other} 9100")
         admin.succeed(f"nc -z -w 3 {mgmt} 22")  # positive control
 
-    with subtest("libvirt runs unprivileged QEMU and no libvirt network is active"):
-        # libvirtd is socket-activated and exits when idle (--timeout 120):
-        # virsh starts it.
-        hv01.wait_for_unit("libvirtd.socket")
-        hv01.succeed("virsh -c qemu:///system version")
-        hv01.succeed("grep -Fx 'user = \"qemu-libvirtd\"' /var/lib/libvirt/qemu.conf")
-        # NixOS defines libvirt's "default" NAT network but does not
-        # autostart it. Guest networking is managed by Strata (M2), so no
-        # libvirt network may be active or autostarted, and virbr0 must not exist.
-        active = hv01.succeed("virsh -c qemu:///system net-list --name").strip()
-        assert active == "", f"active libvirt networks: {active}"
-        autostart = hv01.succeed("virsh -c qemu:///system net-list --all --autostart --name").strip()
-        assert autostart == "", f"autostarted libvirt networks: {autostart}"
-        hv01.fail("ip link show virbr0")
+    with subtest("Incus runs and no Incus network exists"):
+        hv01.wait_for_unit("incus.service")
+        hv01.wait_for_unit("strata-incus-setup.service")
+        hv01.fail("systemctl cat libvirtd.service")
+        # Guest networks are declared by Strata (later M2 slice); until then
+        # Incus must not create any, in particular no NAT bridge.
+        managed = hv01.succeed(
+            "incus query '/1.0/networks?recursion=1' | jq -r '.[] | select(.managed) | .name'"
+        ).strip()
+        assert managed == "", f"managed Incus networks: {managed}"
+        hv01.fail("ip link show incusbr0")
 
     with subtest("KVM is available when the CPU exposes virtualization"):
         ext = hv01.succeed("grep -oEm1 '\\b(vmx|svm)\\b' /proc/cpuinfo || true").strip()
         if ext:
             hv01.succeed("test -c /dev/kvm")
-            hv01.succeed("virsh -c qemu:///system domcapabilities --virttype kvm > /dev/null")
+            kvm = hv01.succeed("incus query /1.0 | jq -r .environment.driver").strip()
+            assert "qemu" in kvm, kvm
             # The KVM module may load after the agent's first discovery (seen on
             # CI); periodic discovery (every minute) must pick it up.
             hv01.wait_until_succeeds(

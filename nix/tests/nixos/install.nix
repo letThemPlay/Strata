@@ -52,11 +52,12 @@ disko.lib.testLib.makeDiskoTest {
         assert "systemd-boot" in out, out
 
     with subtest("strata host services run on the installed system"):
-        for unit in ["strata-agent.service", "sshd.service", "libvirtd.socket",
-                     "prometheus-node-exporter.service"]:
+        for unit in ["strata-agent.service", "sshd.service", "incus.service",
+                     "strata-incus-setup.service", "prometheus-node-exporter.service"]:
             machine.wait_for_unit(unit)
-        # libvirtd is socket-activated and exits when idle (--timeout 120).
-        machine.succeed("virsh -c qemu:///system version")
+        machine.succeed("incus info > /dev/null")
+        # The agent reaches Incus with its restricted identity.
+        machine.wait_until_succeeds("grep -Eq '\"trusted\": ?true' /var/lib/strata/backend.json", timeout=60)
         machine.wait_until_succeeds("test -s /var/lib/strata/hardware.json")
         machine.succeed("grep -q '\"name\": \"vda\"' /var/lib/strata/hardware.json")
         machine.succeed("grep -Eq '\"id\": ?\"hv-01\"' /etc/strata/node.json")

@@ -42,7 +42,8 @@ Optional: with direnv, create an untracked `.envrc` containing `use flake`.
 | `examples` | Evaluates `examples/standalone/strata.nix` and checks its structure |
 | `module-eval` | Evaluates NixOS configurations using the Strata modules: option validation, assertions, generated config |
 | `nixos-agent` | NixOS VM test: boots a host with the agent and checks identity, hardware report, privileges, reload and shutdown (needs KVM) |
-| `nixos-host` | NixOS VM test with three nodes: admin SSH and sudo, refused password/root logins, firewall isolation of the management services, node exporter, libvirt, KVM (needs KVM) |
+| `nixos-host` | NixOS VM test with three nodes: admin SSH and sudo, refused password/root logins, firewall isolation of the management services, node exporter, Incus without networks, KVM (needs KVM) |
+| `nixos-incus` | NixOS VM test of Incus on a compute host: the agent's identity runs a container in the Strata project and is refused privileged and nested containers, host paths and devices, low-level settings, other projects and project, server, trust and pool changes; the API listens on loopback only; `strata-incus-setup` reverts project changes and stale trust (needs KVM) |
 | `reference-host` | Builds the reference host: the `host` template plus `nix/hosts/reference.nix` |
 | `nixos-install-ext4` | x86_64 only. Formats an empty disk with the `ext4` layout, installs the reference host and boots it with UEFI firmware, twice (needs KVM) |
 | `installer-system` | Builds the installer ISO's NixOS system (the image itself: `nix build .#iso`) |

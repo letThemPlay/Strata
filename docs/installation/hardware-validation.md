@@ -63,7 +63,7 @@ Remove the stick and reboot.
 | 2.2 | SSH with your key from the management network | `ssh strata-admin@ADDRESS` works; `sudo -n true` works |
 | 2.3 | Password and root logins are refused | `ssh -o PubkeyAuthentication=no ...` and `ssh root@...` fail |
 | 2.4 | Address and route | `networkctl status INTERFACE`: configured, routable; static or DHCP as answered |
-| 2.5 | Host services | `systemctl --failed` lists nothing; `systemctl is-active strata-agent sshd libvirtd.socket prometheus-node-exporter`; `sudo virsh -c qemu:///system version` answers (libvirtd is socket-activated and exits after 2 idle minutes, so `libvirtd` itself may be inactive) |
+| 2.5 | Host services | `systemctl --failed` lists nothing; `systemctl is-active strata-agent sshd incus strata-incus-setup prometheus-node-exporter`; `sudo incus info` answers; `sudo cat /var/lib/strata/backend.json` shows `reachable` and `trusted` true. (Results recorded before M2 used libvirtd, checked with `virsh`.) |
 | 2.6 | Node exporter from the management network only | `curl http://ADDRESS:9100/metrics` works from the management network |
 | 2.7 | Firewall | `sudo nft list ruleset`: ports 22 and 9100 only on the management interface |
 

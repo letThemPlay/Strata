@@ -11,23 +11,7 @@
 #   admin (VLAN 1, 192.168.1.1) ── management ── hv01 eth1 (192.168.1.2)
 { self, pkgs }:
 let
-  # A minimal container image: static busybox, an init that idles.
-  testImage = pkgs.runCommand "strata-incus-test-image" { nativeBuildInputs = [ pkgs.xz ]; } ''
-    mkdir -p rootfs/bin rootfs/sbin rootfs/etc rootfs/dev rootfs/proc rootfs/sys rootfs/tmp rootfs/root
-    cp ${pkgs.pkgsStatic.busybox}/bin/busybox rootfs/bin/busybox
-    for applet in sh cat echo id ls sleep true; do ln -s busybox rootfs/bin/$applet; done
-    printf '#!/bin/sh\nwhile true; do sleep 3600; done\n' > rootfs/sbin/init
-    chmod 755 rootfs/sbin/init
-    cat > metadata.yaml <<EOF
-    architecture: ${pkgs.stdenv.hostPlatform.uname.processor}
-    creation_date: 1700000000
-    properties:
-      description: Strata test image (busybox)
-    EOF
-    mkdir $out
-    tar --owner=0 --group=0 -cJf $out/metadata.tar.xz metadata.yaml
-    tar --owner=0 --group=0 -cJf $out/rootfs.tar.xz -C rootfs .
-  '';
+  testImage = import ./lib/test-image.nix { inherit pkgs; };
 in
 pkgs.testers.runNixOSTest {
   name = "strata-incus";
@@ -48,6 +32,18 @@ pkgs.testers.runNixOSTest {
           cores = 2;
           memorySize = 2048;
           diskSize = 4096;
+          # A dedicated disk for the test's dir pool.
+          emptyDiskImages = [
+            {
+              size = 1024;
+              driveConfig.deviceExtraOpts.serial = "pool-dir";
+            }
+          ];
+          fileSystems."/srv/pool" = {
+            device = "/dev/disk/by-id/virtio-pool-dir";
+            fsType = "ext4";
+            autoFormat = true;
+          };
         };
 
         strata = {
@@ -55,6 +51,13 @@ pkgs.testers.runNixOSTest {
           node.id = "hv01";
           agent.enable = true;
           compute.enable = true;
+          storage = {
+            defaultPool = "test";
+            pools.test = {
+              driver = "dir";
+              path = "/srv/pool";
+            };
+          };
           networking = {
             enable = true;
             management = {
@@ -127,11 +130,14 @@ pkgs.testers.runNixOSTest {
         admin.wait_until_succeeds("ping -c 1 -W 2 192.168.1.2")
         admin.fail("nc -z -w 3 192.168.1.2 8443")
 
-    # Test-only storage and image (pools are declared by Strata in a later
-    # slice). Set up as root.
+    with subtest("the declared pool is the project's default"):
+        pool = json.loads(hv01.succeed("incus query /1.0/storage-pools/test"))
+        assert pool["driver"] == "dir" and pool["config"]["source"] == "/srv/pool/test", pool
+        profile = json.loads(hv01.succeed("incus query '/1.0/profiles/default?project=strata'"))
+        assert profile["devices"]["root"] == {"type": "disk", "path": "/", "pool": "test"}, profile
+
+    # A test-only image, imported as root.
     hv01.succeed(
-        "incus storage create default dir",
-        "incus profile device add default root disk path=/ pool=default --project strata",
         "incus image import ${testImage}/metadata.tar.xz ${testImage}/rootfs.tar.xz --alias test --project strata",
     )
 
@@ -155,7 +161,10 @@ pkgs.testers.runNixOSTest {
         assert message in out, f"{command}: expected {message!r}, got {out!r}"
 
     with subtest("the agent identity manages containers in its project"):
-        hv01.succeed(f"{agent} launch test c1")
+        code, out = hv01.execute(f"{agent} launch test c1 2>&1")
+        if code != 0:
+            print(hv01.execute("cat /var/log/incus/strata_c1/lxc.log; ls -la /srv/pool /srv/pool/test; findmnt /srv/pool")[1])
+            raise Exception(f"launch failed: {out}")
         hv01.wait_until_succeeds(in_c1("/bin/true"), timeout=60)
         assert hv01.succeed(in_c1("/bin/id -u")).strip() == "0"
         info = json.loads(hv01.succeed(f"{agent} query '/1.0/instances/c1?project=strata'"))

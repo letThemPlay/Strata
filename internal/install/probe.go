@@ -1,15 +1,13 @@
 package install
 
 import (
-	"bufio"
 	"errors"
 	"fmt"
 	"io/fs"
-	"path"
 	"slices"
-	"strconv"
 	"strings"
 
+	"github.com/letthemplay/Strata/internal/blockdev"
 	"github.com/letthemplay/Strata/internal/hardware"
 )
 
@@ -37,10 +35,7 @@ type DiskInfo struct {
 }
 
 // Partition is an existing partition on the target disk.
-type Partition struct {
-	Name      string
-	SizeBytes uint64
-}
+type Partition = blockdev.Partition
 
 // Probe checks the answer file against the running system: the target
 // disk must be an existing, writable whole disk of at least MinDiskBytes
@@ -68,7 +63,7 @@ func Probe(root fs.FS, a Answers) (DiskInfo, error) {
 func probeDisk(root fs.FS, report hardware.Report, device string) (DiskInfo, error) {
 	info := DiskInfo{Device: device}
 
-	name, err := resolveDevice(root, device)
+	name, err := blockdev.Resolve(root, device)
 	if err != nil {
 		return info, fmt.Errorf("disk.device: %w", err)
 	}
@@ -81,7 +76,7 @@ func probeDisk(root fs.FS, report hardware.Report, device string) (DiskInfo, err
 	d := report.BlockDevices[idx]
 	info.SizeBytes, info.Model, info.Removable = d.SizeBytes, d.Model, d.Removable
 
-	if info.Partitions, err = partitions(root, name); err != nil {
+	if info.Partitions, err = blockdev.Partitions(root, name); err != nil {
 		return info, fmt.Errorf("disk.device: %w", err)
 	}
 	info.ExistingData, info.DataUnknown = existingData(root, name, info.Partitions)
@@ -94,179 +89,36 @@ func probeDisk(root fs.FS, report hardware.Report, device string) (DiskInfo, err
 	if ro, _ := fs.ReadFile(root, "sys/block/"+name+"/ro"); strings.TrimSpace(string(ro)) == "1" {
 		errs = append(errs, fmt.Errorf("disk.device: %s is read-only", device))
 	}
-	inUse, err := devicesInUse(root)
+	inUse, err := blockdev.MountsAndSwap(root)
 	if err != nil {
 		return info, fmt.Errorf("disk.device: %w", err)
 	}
-	for _, dev := range append([]string{name}, partitionNames(info.Partitions)...) {
+	for _, dev := range append([]string{name}, blockdev.PartitionNames(info.Partitions)...) {
 		if use, ok := inUse[dev]; ok {
 			errs = append(errs, fmt.Errorf("disk.device: %s is in use (/dev/%s %s); this may be the installation medium", device, dev, use))
 		}
 		// Holders are device-mapper (LVM, LUKS) or md RAID devices built on
 		// this disk or partition.
-		holdersDir := "sys/block/" + name + "/holders"
-		if dev != name {
-			holdersDir = "sys/block/" + name + "/" + dev + "/holders"
-		}
-		if holders, err := fs.ReadDir(root, holdersDir); err == nil && len(holders) > 0 {
-			errs = append(errs, fmt.Errorf("disk.device: %s is in use (/dev/%s is part of /dev/%s); deactivate it first", device, dev, holders[0].Name()))
+		if holders := blockdev.Holders(root, name, dev); len(holders) > 0 {
+			errs = append(errs, fmt.Errorf("disk.device: %s is in use (/dev/%s is part of /dev/%s); deactivate it first", device, dev, holders[0]))
 		}
 	}
 	return info, errors.Join(errs...)
-}
-
-// resolveDevice follows symlinks (as under /dev/disk/by-id/) from device
-// to a kernel device name under /dev.
-func resolveDevice(root fs.FS, device string) (string, error) {
-	p := strings.TrimPrefix(path.Clean(device), "/")
-	for range 16 {
-		fi, err := fs.Lstat(root, p)
-		if err != nil {
-			return "", fmt.Errorf("%s does not exist", device)
-		}
-		if fi.Mode()&fs.ModeSymlink == 0 {
-			if path.Dir(p) != "dev" {
-				return "", fmt.Errorf("%s does not resolve to a device node directly under /dev", device)
-			}
-			return path.Base(p), nil
-		}
-		target, err := fs.ReadLink(root, p)
-		if err != nil {
-			return "", fmt.Errorf("resolve %s: %w", device, err)
-		}
-		if !path.IsAbs(target) {
-			target = path.Join("/", path.Dir(p), target)
-		}
-		p = strings.TrimPrefix(path.Clean(target), "/")
-	}
-	return "", fmt.Errorf("%s: too many levels of symbolic links", device)
-}
-
-// partitions lists the partitions of disk name from /sys/block/<name>/.
-func partitions(root fs.FS, name string) ([]Partition, error) {
-	dir := "sys/block/" + name
-	entries, err := fs.ReadDir(root, dir)
-	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", dir, err)
-	}
-	var parts []Partition
-	for _, e := range entries {
-		if !strings.HasPrefix(e.Name(), name) {
-			continue
-		}
-		if _, err := fs.Stat(root, dir+"/"+e.Name()+"/partition"); err != nil {
-			continue
-		}
-		p := Partition{Name: e.Name()}
-		if s, err := fs.ReadFile(root, dir+"/"+e.Name()+"/size"); err == nil {
-			if sectors, err := strconv.ParseUint(strings.TrimSpace(string(s)), 10, 64); err == nil {
-				p.SizeBytes = sectors * 512
-			}
-		}
-		parts = append(parts, p)
-	}
-	return parts, nil
 }
 
 // existingData lists the filesystem and membership signatures that udev
 // found (with blkid) on disk name and its partitions. It reports unknown
 // if there is no udev database.
 func existingData(root fs.FS, name string, parts []Partition) ([]string, bool) {
-	if _, err := fs.Stat(root, "run/udev/data"); err != nil {
+	sigs, err := blockdev.Signatures(root, name, parts)
+	if err != nil {
 		return nil, true
 	}
-	var found []string
-	for _, dev := range append([]string{name}, partitionNames(parts)...) {
-		sysDir := "sys/block/" + name
-		if dev != name {
-			sysDir += "/" + dev
-		}
-		num, err := fs.ReadFile(root, sysDir+"/dev")
-		if err != nil {
-			continue
-		}
-		props := udevProperties(root, "run/udev/data/b"+strings.TrimSpace(string(num)))
-		fsType := props["ID_FS_TYPE"]
-		if fsType == "" {
-			continue
-		}
-		desc := "/dev/" + dev + ": " + fsType
-		if label := props["ID_FS_LABEL"]; label != "" {
-			desc += fmt.Sprintf(" %q", label)
-		}
-		found = append(found, desc)
+	found := make([]string, 0, len(sigs))
+	for _, sig := range sigs {
+		found = append(found, sig.String())
 	}
 	return found, false
-}
-
-// udevProperties reads the E: (property) lines of a udev database file.
-func udevProperties(root fs.FS, file string) map[string]string {
-	props := map[string]string{}
-	data, err := fs.ReadFile(root, file)
-	if err != nil {
-		return props
-	}
-	for _, line := range strings.Split(string(data), "\n") {
-		rest, isProperty := strings.CutPrefix(line, "E:")
-		if k, v, ok := strings.Cut(rest, "="); isProperty && ok {
-			props[k] = v
-		}
-	}
-	return props
-}
-
-func partitionNames(parts []Partition) []string {
-	names := make([]string, len(parts))
-	for i, p := range parts {
-		names[i] = p.Name
-	}
-	return names
-}
-
-// devicesInUse maps kernel device names that are mounted or used as swap
-// to a description of the use.
-func devicesInUse(root fs.FS) (map[string]string, error) {
-	inUse := map[string]string{}
-	scan := func(file string, use func(fields []string) (string, string, bool)) error {
-		f, err := root.Open(file)
-		if err != nil {
-			return fmt.Errorf("read /%s: %w", file, err)
-		}
-		defer func() { _ = f.Close() }()
-		s := bufio.NewScanner(f)
-		for s.Scan() {
-			if dev, desc, ok := use(strings.Fields(s.Text())); ok {
-				inUse[dev] = desc
-			}
-		}
-		if err := s.Err(); err != nil {
-			return fmt.Errorf("read /%s: %w", file, err)
-		}
-		return nil
-	}
-
-	err := scan("proc/mounts", func(f []string) (string, string, bool) {
-		if len(f) < 2 || !strings.HasPrefix(f[0], "/dev/") {
-			return "", "", false
-		}
-		return strings.TrimPrefix(f[0], "/dev/"), "is mounted on " + f[1], true
-	})
-	if err != nil {
-		return nil, err
-	}
-	// /proc/swaps may be absent (no swap support); that is not an error.
-	if _, statErr := fs.Stat(root, "proc/swaps"); statErr == nil {
-		err = scan("proc/swaps", func(f []string) (string, string, bool) {
-			if len(f) < 1 || !strings.HasPrefix(f[0], "/dev/") {
-				return "", "", false
-			}
-			return strings.TrimPrefix(f[0], "/dev/"), "is used as swap", true
-		})
-		if err != nil {
-			return nil, err
-		}
-	}
-	return inUse, nil
 }
 
 func interfaceNames(r hardware.Report) string {

@@ -235,6 +235,7 @@
           nixos-agent = import ./nix/tests/nixos/agent.nix { inherit self pkgs; };
           nixos-host = import ./nix/tests/nixos/host.nix { inherit self pkgs; };
           nixos-incus = import ./nix/tests/nixos/incus.nix { inherit self pkgs; };
+          nixos-storage = import ./nix/tests/nixos/storage.nix { inherit self pkgs; };
 
           # The reference host builds for every supported system.
           reference-host = (mkReferenceHost system).config.system.build.toplevel;

@@ -1,7 +1,7 @@
 # Strata Architecture
 
-**Status:** Milestone M1 complete; M2 in progress (slice 1: Incus host and
-the agent's restricted identity). Incus is the workload backend (ADR-0015). This document describes the target
+**Status:** Milestone M1 complete; M2 in progress (slices 1–2: Incus host,
+the agent's restricted identity, storage pools). Incus is the workload backend (ADR-0015). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
 
@@ -99,7 +99,9 @@ today:
 | `internal/hardware` | Hardware discovery from procfs/sysfs (no exec) |
 | `internal/agent` | Agent run loop, atomic report writing, agent subcommands |
 | `internal/install` | Answer file, `host.nix` rendering, disk and NIC probing, installation steps |
-| `internal/incus` | Minimal Incus API client (loopback HTTPS, client identity, pinned server certificate) |
+| `internal/incus` | Minimal Incus API client: loopback HTTPS with a client identity and pinned server certificate (agent); Unix socket (`strata-host` only) |
+| `internal/blockdev` | Block device inspection (procfs, sysfs, udev database): resolution, signatures, uses, system disks; shared by the installer and pool setup |
+| `internal/hostsetup`, `cmd/strata-host` | Root-only Incus setup run by NixOS: project, agent identity and trust, storage pools |
 | `nix/packages/` | Package definitions (`strata`) |
 | `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring`, `disk` |
 | `nix/hosts/` | Test values completing the host template into the reference host |
@@ -112,7 +114,7 @@ today:
 | `.github/workflows/` | CI |
 
 Planned (not yet created):
-`internal/{workload,storage,networking,...}` (M2+), `internal/{gitops,schema,
+`internal/{workload,networking,...}` (M2+), `internal/{gitops,schema,
 planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 `internal/cluster` (M6).
 
@@ -135,9 +137,10 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | Installer ISO and `strata-install plan/apply` (answer file, offline install) | **Implemented** (M1 slice 4a, experimental) |
 | `strata-install init` (interactive answer file wizard) | **Implemented** (M1 slice 4b, experimental) |
 | Physical hardware validation | **Passed** (M1 slice 5): Intel (Lenovo ThinkServer TS140) and AMD (GMKtec M6 Ultra). See [results](docs/installation/hardware-validation.md#results) |
-| Storage pools, guest networks, VM schema and lifecycle | Planned (M2 slices 2+), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
+| `strata.storage` pools on dedicated disks (ZFS, LVM-thin, dir), project limits, LVM autoactivation policy | **Implemented** (M2 slice 2, experimental; ADR-0018) |
+| Guest networks, VM schema and lifecycle | Planned (M2 slices 3+), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
-| System and OCI containers, ZFS, LVM-thin | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
+| System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
 | Clustering | Planned (M6) |
 | Ceph, backup, HA | Planned (M7) |
@@ -190,10 +193,9 @@ Known limitations at the end of M1:
   backend-independent setting (proposed: a `strata.compute` option, on by default).
 - Installing from remote IP KVM virtual media (JetKVM) did not work; use a
   USB stick.
-- On reused machines, LVM groups on other disks are activated
-  automatically at boot (standard NixOS behaviour), which conflicts with
-  the decision that workload storage uses explicitly configured pools only
-  (ADR-0015); to be settled with the M4 storage work.
+- On reused machines, LVM groups on other disks were activated
+  automatically at boot (standard NixOS behaviour). Settled in M2 slice 2:
+  only declared pools' volume groups activate (ADR-0018).
 - One system disk layout: ext4 on a single disk, UEFI only, systemd-boot,
   no mirroring, no swap, no Secure Boot.
 - Management network: one interface, static or DHCP; no VLAN or bond.
@@ -219,7 +221,9 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
    the agent's restricted TLS identity and backend status (ADR-0017),
    proven by the `nixos-incus` VM test. **Done.**
 2. Storage pools on dedicated disks (ZFS, LVM-thin, directory), declared in
-   NixOS, with allocation policies (project limits). Planned.
+   NixOS, created only on empty disks or adopted, never deleted; project
+   limits; LVM autoactivation limited to declared pools (ADR-0018). The
+   project setup moved from a shell script to `strata-host` (Go). **Done.**
 3. Guest networks: Incus-managed networks declared in NixOS, isolated from
    the management interface. Planned.
 4. VM schema, the Incus provider and VM lifecycle through the CLI. Planned.
@@ -683,3 +687,86 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
   - Snapshots and backups are blocked by the project restrictions until the
     storage slice decides them; image sources (`restricted.images.servers`)
     are decided with the VM schema slice.
+- **Update (M2 slice 2):** the setup is now `strata-host incus-setup`
+  (Go, `internal/hostsetup`), reading a JSON description of the desired
+  state that NixOS generates, instead of a shell script; it runs again
+  whenever that description changes. Behaviour is unchanged, with one
+  addition: the project's allowed pools and limits are set (ADR-0018). The
+  key is now created in Go (EC P-384, PKCS#8); existing identities are kept.
+  Snapshots are allowed; backup export stays blocked until M7.
+
+### ADR-0018: Storage pools on dedicated disks
+
+- **Status:** Accepted (M2 slice 2). Implements the storage decision of
+  ADR-0015 and settles the M1 LVM autoactivation finding.
+- **Context:** workload storage is separate from the system disk, with
+  explicit pool configuration and allocation policies (ADR-0015). Incus
+  creates ZFS and LVM pools on block devices itself (`zpool create`,
+  `pvcreate`/`vgcreate`); with `source.wipe` it would erase them first.
+  Data loss from a wrong device name must be impossible by construction.
+- **Decision:**
+  - **Declared in NixOS** (`strata.storage.pools`): driver `zfs` (one disk or
+    a two-disk mirror), `lvm` (one disk, thin pool) or `dir` (a mount point
+    declared in `fileSystems`, pool in `<path>/<name>`). Devices are
+    `/dev/disk/by-id/` paths, used by one pool only, never
+    `strata.disk.device` (checked at evaluation).
+  - **Created by `strata-host incus-setup`** (root) as Incus pools, only on
+    devices that are verifiably empty: a whole disk, not behind `/`, `/boot`
+    or `/nix`, not mounted, swap, or held by device-mapper or md, with no
+    partition table, partition or signature in the udev database. Without a
+    udev database it refuses. `source.wipe` is never set. **Strata has no
+    erase option**: an administrator wipes a disk deliberately.
+  - **Adoption** (`adopt = true`): an existing, empty zpool or volume group
+    named like the pool, whose disks carry only its signatures (checked via
+    udev labels for ZFS and `pvs` for LVM). This covers layouts Strata does
+    not model (raidz). Recovering pools with instances is `incus admin
+    recover`, not adoption.
+  - **Never modified or deleted:** an existing pool whose driver or original
+    source differs from its declaration is reported and left alone. A pool
+    removed from the configuration keeps its data and instances. It is
+    closed to the project (`limits.disk.pool.<name>=0`, and left out of
+    the allowed pools) once no instance or profile of the project uses it;
+    until then it stays open with a warning, because Incus refuses to close
+    a pool under existing instances and Strata never deletes them. Cached
+    images do not count. Other undeclared pools are closed the same way.
+  - **Project access and allocation:** `restricted.storage-pools.access`
+    lists exactly the declared pools (a reserved sentinel name when there
+    are none, because Incus treats an empty list as "all"). Per-pool limits
+    (`limits.disk.pool.<name>`, applied once the pool exists, as Incus
+    requires) and project limits (`limits.cpu`, `limits.memory`,
+    `limits.disk`, `limits.instances`) come from options. The default
+    profile's root disk is put on `strata.storage.defaultPool`, with
+    `strata.storage.rootSize`: Incus counts disk limits by the sizes given
+    to instances, so instances on a limited pool need one (required at
+    evaluation when the default pool or the project is limited).
+  - **Refusals are per pool:** one refused pool does not stop the project,
+    identity or other pools; the service exits non-zero and the journal
+    names the device and what was found.
+  - **ZFS** is enabled only when a zfs pool is declared, with an
+    evaluation-time check that the kernel's ZFS module is available
+    (CLAUDE.md §6) and `networking.hostId` derived from the node ID.
+  - **LVM autoactivation:** `activation/auto_activation_volume_list` lists
+    only declared lvm pools' volume groups, and is empty in the initrd's own
+    `lvm.conf` (the VM test showed the initrd activating every volume group,
+    and failing on thin pools, before the real system starts). It is the
+    default where Strata owns the disk layout (`strata.disk`, no LVM);
+    elsewhere the NixOS default (all) stays, because a hand-made host may
+    need its own volume groups at boot.
+  - **Kernel modules:** an lvm pool loads `dm_thin_pool` and `dm_snapshot`
+    at boot; Incus needs them and nothing loads them on demand.
+  - **Snapshots allowed, backup export blocked** (until M7).
+- **Verified by:** `internal/hostsetup` and `internal/blockdev` unit tests
+  (refusal table, adoption, existing pools, sentinel, trust correction;
+  mutation-checked), `module-eval`, and the `nixos-storage` VM test (ZFS
+  mirror, LVM-thin and dir pools used by the agent's identity; refusal of a
+  disk with a filesystem, the system disk and a changed driver; adoption of
+  a hand-made zpool; removal keeping data; a foreign volume group staying
+  inactive across a reboot; pools and containers surviving a reboot).
+- **Consequences and limitations:**
+  - Growing pools (adding disks, replacing a mirror disk) is done with
+    `zpool`/`lvm` by hand; Strata does not track it and reports a source
+    mismatch only if the original source changes.
+  - Pool health (degraded mirrors, full thin pools) is not monitored yet
+    (M5 monitoring).
+  - ZFS on a host means the ZFS kernel module must exist for its kernel;
+    nixpkgs kernel updates can lag ZFS releases.

@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/letthemplay/Strata/internal/blockdev"
 	"github.com/letthemplay/Strata/internal/hardware"
 )
 
@@ -61,7 +62,7 @@ func byIDLinks(root fs.FS) (map[string][]string, error) {
 	}
 	links := map[string][]string{}
 	for _, e := range entries {
-		name, err := resolveDevice(root, byIDDir+e.Name())
+		name, err := blockdev.Resolve(root, byIDDir+e.Name())
 		if err != nil {
 			continue
 		}

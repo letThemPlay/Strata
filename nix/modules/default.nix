@@ -9,5 +9,6 @@
     ./networking
     ./monitoring
     ./disk
+    ./storage
   ];
 }

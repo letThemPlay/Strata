@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -110,6 +111,30 @@ func New(cfg Config) (*Client, error) {
 	}, nil
 }
 
+// NewUnix returns a client for the Incus Unix socket at socket. Access to
+// it is root-equivalent: only strata-host, run as root by NixOS, uses it.
+// The agent never does (ADR-0017). project may be empty.
+func NewUnix(socket, project string, timeout time.Duration) *Client {
+	if timeout == 0 {
+		timeout = DefaultTimeout
+	}
+	return &Client{
+		base:    url.URL{Scheme: "http", Host: "incus"},
+		project: project,
+		http: &http.Client{
+			Timeout: timeout,
+			Transport: &http.Transport{
+				DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+					var d net.Dialer
+					return d.DialContext(ctx, "unix", socket)
+				},
+				Proxy:             nil,
+				DisableKeepAlives: true,
+			},
+		},
+	}
+}
+
 // Close releases idle connections.
 func (c *Client) Close() {
 	c.http.CloseIdleConnections()
@@ -153,61 +178,136 @@ type response struct {
 	Type      string          `json:"type"`
 	ErrorCode int             `json:"error_code"`
 	Error     string          `json:"error"`
+	Operation string          `json:"operation"`
 	Metadata  json.RawMessage `json:"metadata"`
 }
 
-// get performs a GET request in the client's project and decodes the
-// metadata of a synchronous response into out.
+// get performs a GET request and decodes the metadata into out.
 func (c *Client) get(ctx context.Context, path string, out any) error {
-	u := c.base
-	u.Path = path
-	u.RawQuery = url.Values{"project": {c.project}}.Encode()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), http.NoBody)
-	if err != nil {
-		return fmt.Errorf("incus: GET %s: %w", path, err)
-	}
-	resp, err := c.http.Do(req)
-	if err != nil {
-		return fmt.Errorf("incus: GET %s: %w", path, err)
-	}
-	defer func() { _ = resp.Body.Close() }()
+	return c.Do(ctx, http.MethodGet, path, nil, out)
+}
 
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+// Do performs an API request in the client's project (if it has one) and
+// decodes the metadata of the result into out (if not nil). path may carry
+// a query string. A body is encoded as JSON. For asynchronous operations
+// (e.g. creating a storage pool) Do waits for the operation to finish and
+// returns its error, if any.
+func (c *Client) Do(ctx context.Context, method, path string, body, out any) error {
+	r, status, err := c.roundTrip(ctx, method, path, body)
 	if err != nil {
-		return fmt.Errorf("incus: GET %s: read response: %w", path, err)
+		return err
 	}
-	if len(body) > maxResponseBytes {
-		return fmt.Errorf("incus: GET %s: response exceeds %d bytes", path, maxResponseBytes)
-	}
-	var r response
-	if err := json.Unmarshal(body, &r); err != nil {
-		return fmt.Errorf("incus: GET %s: HTTP %d: malformed response: %w", path, resp.StatusCode, err)
-	}
-	if r.Type == "error" || resp.StatusCode != http.StatusOK {
+	switch {
+	case r.Type == "error" || status >= http.StatusBadRequest:
 		msg := r.Error
 		if msg == "" {
-			msg = http.StatusText(resp.StatusCode)
+			msg = http.StatusText(status)
 		}
-		return &APIError{Path: path, StatusCode: resp.StatusCode, Message: msg}
+		return &APIError{Method: method, Path: path, StatusCode: status, Message: msg}
+	case r.Type == "async" && method != http.MethodGet && r.Operation != "":
+		return c.wait(ctx, method, path, r.Operation, out)
+	case r.Type != "sync":
+		return fmt.Errorf("incus: %s %s: unexpected response type %q", method, path, r.Type)
 	}
-	if r.Type != "sync" {
-		return fmt.Errorf("incus: GET %s: unexpected response type %q", path, r.Type)
+	if out == nil || len(r.Metadata) == 0 {
+		return nil
 	}
 	if err := json.Unmarshal(r.Metadata, out); err != nil {
-		return fmt.Errorf("incus: GET %s: malformed metadata: %w", path, err)
+		return fmt.Errorf("incus: %s %s: malformed metadata: %w", method, path, err)
 	}
 	return nil
 }
 
+// wait waits for the operation op started by method path.
+func (c *Client) wait(ctx context.Context, method, path, op string, out any) error {
+	var result struct {
+		Status   string          `json:"status"`
+		Err      string          `json:"err"`
+		Metadata json.RawMessage `json:"metadata"`
+	}
+	if err := c.Do(ctx, http.MethodGet, op+"/wait", nil, &result); err != nil {
+		return fmt.Errorf("incus: %s %s: wait for %s: %w", method, path, op, err)
+	}
+	if result.Status != "Success" {
+		msg := result.Err
+		if msg == "" {
+			msg = "operation " + result.Status
+		}
+		return &APIError{Method: method, Path: path, StatusCode: http.StatusOK, Message: msg}
+	}
+	if out != nil && len(result.Metadata) > 0 && string(result.Metadata) != "null" {
+		if err := json.Unmarshal(result.Metadata, out); err != nil {
+			return fmt.Errorf("incus: %s %s: malformed operation metadata: %w", method, path, err)
+		}
+	}
+	return nil
+}
+
+// roundTrip sends one request and decodes the response envelope.
+func (c *Client) roundTrip(ctx context.Context, method, path string, body any) (response, int, error) {
+	u := c.base
+	p, query, _ := strings.Cut(path, "?")
+	u.Path = p
+	q, err := url.ParseQuery(query)
+	if err != nil {
+		return response{}, 0, fmt.Errorf("incus: %s %s: %w", method, path, err)
+	}
+	if c.project != "" && q.Get("project") == "" {
+		q.Set("project", c.project)
+	}
+	u.RawQuery = q.Encode()
+
+	var reqBody io.Reader = http.NoBody
+	if body != nil {
+		data, err := json.Marshal(body)
+		if err != nil {
+			return response{}, 0, fmt.Errorf("incus: %s %s: encode request: %w", method, path, err)
+		}
+		reqBody = bytes.NewReader(data)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u.String(), reqBody)
+	if err != nil {
+		return response{}, 0, fmt.Errorf("incus: %s %s: %w", method, path, err)
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return response{}, 0, fmt.Errorf("incus: %s %s: %w", method, path, err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	if err != nil {
+		return response{}, 0, fmt.Errorf("incus: %s %s: read response: %w", method, path, err)
+	}
+	if len(data) > maxResponseBytes {
+		return response{}, 0, fmt.Errorf("incus: %s %s: response exceeds %d bytes", method, path, maxResponseBytes)
+	}
+	var r response
+	if err := json.Unmarshal(data, &r); err != nil {
+		return response{}, 0, fmt.Errorf("incus: %s %s: HTTP %d: malformed response: %w", method, path, resp.StatusCode, err)
+	}
+	return r, resp.StatusCode, nil
+}
+
 // APIError is an error returned by the Incus API.
 type APIError struct {
+	Method     string
 	Path       string
 	StatusCode int
 	Message    string
 }
 
 func (e *APIError) Error() string {
-	return fmt.Sprintf("incus: GET %s: HTTP %d: %s", e.Path, e.StatusCode, e.Message)
+	return fmt.Sprintf("incus: %s %s: HTTP %d: %s", e.Method, e.Path, e.StatusCode, e.Message)
+}
+
+// IsNotFound reports whether err is an Incus "not found" error.
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
 }
 
 // loadCertificate reads the first PEM certificate from file.

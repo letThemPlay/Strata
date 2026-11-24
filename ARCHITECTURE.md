@@ -132,6 +132,7 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | Formatting (gofumpt, goimports, nixfmt) and linting (golangci-lint, statix, deadnix) | **Implemented** |
 | Go unit tests, Nix evaluation tests, NixOS VM tests (including install-and-boot) | **Implemented** |
 | GitHub Actions CI (all checks evaluated, non-VM checks built; VM tests run locally, ADR-0016) | **Implemented** |
+| Dependabot (Actions, flake inputs, Go modules), CodeQL (Go, Actions), govulncheck gate with an expiring allow-list, SHA-pinned actions | **Implemented** (ADR-0022) |
 | Sample infrastructure configuration | **Example only** — no schema, not consumed by any code |
 | NixOS options `strata.{enable,package,node.id,node.role,agent.enable}` | **Implemented** (M1 slice 1, experimental) — see [options](docs/administration/options.md) |
 | Hardware discovery (`strata-agent discover`, `/var/lib/strata/hardware.json`) | **Implemented** (M1 slice 1, experimental; schema `v1alpha1`) |
@@ -963,3 +964,44 @@ Known limitations at the end of M2:
   a restart and seen by the guest (CPU, memory, a new disk); refused
   changes; a stale plan; detaching keeping the volume; audit; autostart
   after a host reboot; delete with confirmation keeping data volumes).
+
+### ADR-0022: Dependency updates and code scanning
+
+- **Context:** Strata pins everything through `flake.lock`, including the
+  Go toolchain (nixpkgs' `go`; `GOTOOLCHAIN=local`), so Go standard library
+  fixes only arrive with a nixpkgs update. Go has no third-party modules yet
+  (ADR-0004). A nixpkgs update also moves the kernel, Incus, ZFS and QEMU,
+  which only the NixOS VM tests exercise, and CI does not run them
+  (ADR-0016). The repository is public.
+- **Decision:**
+  - **Dependabot** (`.github/dependabot.yml`) opens version updates for
+    GitHub Actions (weekly, minor and patch grouped), Nix flake inputs
+    (monthly, all inputs in one pull request, at most one open) and Go
+    modules (weekly; no modules yet). A `flake.lock` pull request is a
+    module change for ADR-0016: run `make vm-test` before merging it.
+  - **CodeQL** (`.github/workflows/codeql.yml`) analyses Go and the
+    workflows themselves with the `security-extended` suite on pushes to
+    `main`, pull requests and weekly. Go is built (autobuild) with the
+    toolchain from `flake.lock`, not a separately installed release.
+  - **govulncheck** checks the code against the Go vulnerability database
+    with the pinned toolchain. CI (`make vulncheck`) fails on any
+    vulnerability in called code unless `.govulncheck-allow` lists it with
+    a reason and an expiry date (`tools/vulngate`); expired entries fail
+    again and entries no longer reported are flagged for removal. A weekly
+    workflow uploads the findings to code scanning, so new advisories
+    appear without a commit. The usual fix is the pending `flake.lock`
+    update; when nixpkgs has no fix yet, an allow-list entry with an
+    assessment of the impact is the documented exception.
+  - Workflows pin actions to commit SHAs (Dependabot updates them), check
+    out without persisted credentials, and grant per-job permissions.
+    `actionlint` (with shellcheck) checks them in `make lint` and in the
+    `actions-lint` flake check.
+- **Consequences:** a new Go advisory can fail CI for pull requests that did
+  not change Go code; that is intended, and the allow-list keeps the
+  exception visible and time-limited. Not covered: CVE scanning of the
+  host closure (vulnix; too noisy to act on while tracking
+  nixos-unstable), container images (none yet) and the frontend
+  dependencies (added with `web/` in M5). Repository settings that the
+  configuration cannot express (Dependabot alerts, secret scanning with
+  push protection, private vulnerability reporting, CodeQL default setup
+  left off) are listed in `docs/development/README.md`.

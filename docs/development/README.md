@@ -10,7 +10,8 @@ nix develop
 ```
 
 The shell provides: `go`, `gopls`, `gotools`, `gofumpt`, `golangci-lint`,
-`make`, `git`, `nixfmt`, `statix`, `deadnix`. It sets `GOTOOLCHAIN=local` so
+`make`, `git`, `nixfmt`, `statix`, `deadnix`, `actionlint`, `shellcheck`,
+`govulncheck`. It sets `GOTOOLCHAIN=local` so
 Go never downloads a different toolchain.
 
 Optional: with direnv, create an untracked `.envrc` containing `use flake`.
@@ -23,7 +24,8 @@ Optional: with direnv, create an untracked `.envrc` containing `use flake`.
 | `make test-race` | Tests with the race detector |
 | `make fmt` | Format Go (gofumpt) and Nix (`nix fmt`, nixfmt) |
 | `make fmt-check` | Fail if anything is unformatted |
-| `make lint` | golangci-lint, statix, deadnix |
+| `make lint` | golangci-lint, statix, deadnix, actionlint (workflows) |
+| `make vulncheck` | govulncheck with the pinned Go toolchain; fails on called vulnerabilities not in `.govulncheck-allow` (needs network) |
 | `make build` | Build binaries into `./bin` with version metadata |
 | `make nix-check` | `nix flake check`: every check, including the VM tests |
 | `make nix-check-novm` | Evaluates every check and builds all but the VM tests (what CI runs) |
@@ -39,6 +41,7 @@ Optional: with direnv, create an untracked `.envrc` containing `use flake`.
 | `go-lint` | golangci-lint with `.golangci.yml` (offline) |
 | `nix-fmt` | nixfmt formatting of all `.nix` files |
 | `nix-lint` | statix and deadnix |
+| `actions-lint` | actionlint (with shellcheck) on `.github/workflows` |
 | `examples` | Evaluates `examples/standalone/strata.nix` and checks its structure |
 | `module-eval` | Evaluates NixOS configurations using the Strata modules: option validation, assertions, generated config |
 | `nixos-agent` | NixOS VM test: boots a host with the agent and checks identity, hardware report, privileges, reload and shutdown (needs KVM) |
@@ -69,7 +72,52 @@ Nix flakes only see files tracked by Git. Run `git add` on new files before
 ## CI
 
 `.github/workflows/ci.yml` runs `make nix-check-novm`, then format check,
-lint, tests and race-detector tests inside the development shell.
+lint, tests, race-detector tests and `make vulncheck` inside the development
+shell. Two more workflows (ADR-0022):
+
+- `codeql.yml`: CodeQL `security-extended` for Go and for the workflows, on
+  pushes to `main`, pull requests and weekly. Results are under Security ->
+  Code scanning.
+- `govulncheck.yml`: weekly and on `main`, uploads govulncheck findings to
+  code scanning.
+
+Workflow actions are pinned to commit SHAs with the version in a comment;
+Dependabot updates both. Run `make lint` after editing a workflow.
+
+## Dependency updates
+
+Dependabot (`.github/dependabot.yml`) opens pull requests for GitHub
+Actions (weekly), flake inputs (monthly, one grouped pull request) and Go
+modules (weekly). **A `flake.lock` update changes the kernel, Incus, ZFS,
+QEMU and the Go toolchain: run `make vm-test` locally before merging it**,
+as for any module change.
+
+### Go vulnerabilities and the allow-list
+
+`make vulncheck` fails when govulncheck finds a vulnerability in code
+Strata calls. The Go toolchain comes from `flake.lock`, so a standard
+library fix usually means merging (or making) a `flake.lock` update. If
+nixpkgs does not have the fix yet, add the ID to `.govulncheck-allow`:
+
+```text
+GO-2026-6859 2026-12-31 why the impact is acceptable until the fix lands
+```
+
+The date is the last day the entry applies; after it, CI fails again. The
+gate also prints entries that are no longer reported, so remove those.
+
+### Repository settings
+
+These are set in the GitHub UI (Settings -> Advanced Security), not in the
+repository:
+
+- Dependabot alerts and Dependabot security updates: on.
+- Secret scanning and push protection: on.
+- Private vulnerability reporting: on (see `SECURITY.md`).
+- CodeQL **default setup: off**; `codeql.yml` is the advanced setup, and
+  the two conflict.
+- Optional: a ruleset on `main` requiring the `nix flake check`,
+  `CodeQL (go)` and `CodeQL (actions)` checks.
 
 **CI does not run the NixOS VM tests** (ADR-0016). It evaluates them, so a
 broken test definition still fails CI, but it does not boot them. Run them

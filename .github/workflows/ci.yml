@@ -18,9 +18,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-      - uses: cachix/install-nix-action@v31
+      - uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
         with:
           extra_nix_config: |
             experimental-features = nix-command flakes
@@ -42,3 +44,8 @@ jobs:
 
       - name: Go tests (race detector)
         run: nix develop --command make test-race
+
+      # Known vulnerabilities reachable from Strata's code, in the Go
+      # toolchain pinned by flake.lock or in Go modules (ADR-0022).
+      - name: govulncheck
+        run: nix develop --command make vulncheck

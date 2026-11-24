@@ -44,20 +44,25 @@ test-race: ## Run Go unit tests with the race detector (requires cgo)
 
 .PHONY: fmt
 fmt: ## Format Go and Nix sources
-	gofumpt -w cmd internal
+	gofumpt -w cmd internal tools
 	nix fmt
 
 .PHONY: fmt-check
 fmt-check: ## Fail if Go or Nix sources are not formatted
-	@out=$$(gofumpt -l cmd internal); \
+	@out=$$(gofumpt -l cmd internal tools); \
 	if [ -n "$$out" ]; then echo "Unformatted Go files:"; echo "$$out"; exit 1; fi
 	@git ls-files -z --cached --others --exclude-standard '*.nix' | xargs -0 nixfmt --check
 
 .PHONY: lint
-lint: ## Run golangci-lint, statix and deadnix
+lint: ## Run golangci-lint, statix, deadnix and actionlint
 	golangci-lint run ./...
 	statix check .
 	deadnix --fail .
+	actionlint
+
+.PHONY: vulncheck
+vulncheck: ## Report known vulnerabilities reachable from the code (needs network)
+	govulncheck -format json ./... | go run ./tools/vulngate .govulncheck-allow
 
 .PHONY: tidy
 tidy: ## Tidy go.mod

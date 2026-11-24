@@ -1,0 +1,29 @@
+# Dependabot version updates (ADR-0022).
+#
+# A flake.lock update moves nixpkgs: the kernel, Incus, ZFS, QEMU and the
+# Go toolchain. CI does not run the NixOS VM tests (ADR-0016), so run
+# `make vm-test` locally before merging one.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    groups:
+      actions-minor-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: nix
+    directory: /
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 1
+    groups:
+      flake-inputs:
+        patterns: ["*"]
+
+  # No third-party Go modules yet (ADR-0004); this covers the first one.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly

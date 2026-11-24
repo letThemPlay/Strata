@@ -1,0 +1,5 @@
+# Vulnerabilities govulncheck may report without failing CI (ADR-0022).
+# Format: ID EXPIRY(YYYY-MM-DD, last day allowed) REASON
+# Every entry needs a reason and an expiry; remove it once the fix lands.
+
+GO-2026-6859 2026-12-31 net/http server race (fixed in Go 1.27.4); the only server is the agent API on a Unix socket limited to strata-operators; nixos-unstable still ships Go 1.27.3

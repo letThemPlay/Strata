@@ -1,0 +1,64 @@
+name: CodeQL
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, so new queries also reach unchanged code.
+    - cron: "17 4 * * 1"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze:
+    name: CodeQL (${{ matrix.language }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The workflows themselves (injection, permissions, untrusted input).
+          - language: actions
+            build-mode: none
+          - language: go
+            build-mode: autobuild
+    env:
+      GOTOOLCHAIN: local
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Analyse with the Go toolchain Strata is built with: the one pinned
+      # by flake.lock, not a separately installed release.
+      - uses: cachix/install-nix-action@382a9ed9481c7c1f94f68b72ef105b3417c73877 # v32.1.0
+        if: matrix.language == 'go'
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+      - name: Go from flake.lock
+        if: matrix.language == 'go'
+        run: |
+          go=$(nix build --no-link --print-out-paths --inputs-from . nixpkgs#go)
+          echo "$go/bin" >> "$GITHUB_PATH"
+          "$go/bin/go" version
+
+      - uses: github/codeql-action/init@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@915412ff23e8b7659517e607487dbeae018f2934 # v4.39.5
+        with:
+          category: /language:${{ matrix.language }}

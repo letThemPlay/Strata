@@ -38,6 +38,7 @@
           ./go.mod
           (lib.fileset.fileFilter (file: file.hasExt "go") ./cmd)
           (lib.fileset.fileFilter (file: file.hasExt "go") ./internal)
+          (lib.fileset.fileFilter (file: file.hasExt "go") ./tools)
           # Golden files used by Go tests.
           ./internal/install/testdata
         ];
@@ -50,6 +51,11 @@
           (lib.fileset.fromSource goSrc)
           ./.golangci.yml
         ];
+      };
+
+      workflowFiles = lib.fileset.toSource {
+        root = ./.;
+        fileset = ./.github/workflows;
       };
 
       nixFiles = lib.fileset.toSource {
@@ -134,6 +140,9 @@
             nixfmt
             statix
             deadnix
+            actionlint
+            shellcheck
+            govulncheck
           ];
 
           shellHook = ''
@@ -217,6 +226,21 @@
               ''
                 statix check ${nixFiles}
                 deadnix --fail ${nixFiles}
+                touch $out
+              '';
+
+          # GitHub Actions workflows (with shellcheck for their run steps).
+          actions-lint =
+            pkgs.runCommand "strata-actions-lint"
+              {
+                nativeBuildInputs = [
+                  pkgs.actionlint
+                  pkgs.shellcheck
+                ];
+              }
+              ''
+                cd ${workflowFiles}
+                actionlint .github/workflows/*.yml
                 touch $out
               '';
 

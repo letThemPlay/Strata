@@ -52,6 +52,12 @@ type Config struct {
 	// "10GiB"), or "". Incus requires a size on instances in pools with a
 	// disk limit.
 	RootSize string `json:"rootSize"`
+	// Networks are the guest networks; DefaultNetwork is eth0 of the
+	// default profile ("" for none).
+	Networks       []Network `json:"networks"`
+	DefaultNetwork string    `json:"defaultNetwork"`
+	// ManagementInterface is never a guest uplink.
+	ManagementInterface string `json:"managementInterface"`
 }
 
 // Identity describes the agent's TLS identity and its trust entry.
@@ -114,6 +120,8 @@ type Setup struct {
 	Root fs.FS
 	// Exec runs LVM queries (pvs).
 	Exec Runner
+	// Link looks up host interfaces (guest uplinks).
+	Link LinkFunc
 	Log  *slog.Logger
 }
 
@@ -133,23 +141,41 @@ func (s *Setup) Run(ctx context.Context) error {
 		}
 	}
 	existing, poolErr := s.ensurePools(ctx)
-	if err := s.enforceProject(ctx, existing); err != nil {
-		return errors.Join(poolErr, err)
+	networks, netErr := s.ensureNetworks(ctx)
+	refusals := errors.Join(poolErr, netErr)
+	if networks == nil {
+		networks = map[string]incusNetwork{}
 	}
-	moved, err := s.enforceDefaultProfile(ctx, existing)
+	if err := s.enforceProject(ctx, existing, networks); err != nil {
+		return errors.Join(refusals, err)
+	}
+	moved, err := s.enforceDefaultProfile(ctx, existing, networks)
 	if err != nil {
-		return errors.Join(poolErr, err)
+		return errors.Join(refusals, err)
 	}
 	if moved {
-		// The previous default pool may no longer be in use: close it now.
+		// The previous default pool or network may no longer be in use:
+		// close it now.
 		if existing, err = s.listPools(ctx); err == nil {
-			err = s.enforceProject(ctx, existing)
+			if networks, err = s.managedNetworks(ctx); err == nil {
+				err = s.enforceProject(ctx, existing, networks)
+			}
 		}
 		if err != nil {
-			return errors.Join(poolErr, err)
+			return errors.Join(refusals, err)
 		}
 	}
-	return poolErr
+	return refusals
+}
+
+// managedNetworks returns the managed networks without changing any.
+func (s *Setup) managedNetworks(ctx context.Context) (map[string]incusNetwork, error) {
+	all, err := s.listNetworks(ctx)
+	if err != nil {
+		return nil, err
+	}
+	maps.DeleteFunc(all, func(_ string, n incusNetwork) bool { return !n.Managed })
+	return all, nil
 }
 
 // project is the writable part of an Incus project.
@@ -171,7 +197,7 @@ func (s *Setup) ensureProject(ctx context.Context) error {
 	body := map[string]any{
 		"name":        s.Config.Project,
 		"description": s.Config.ProjectDescription,
-		"config":      s.projectConfig(nil),
+		"config":      s.projectConfig(nil, nil),
 	}
 	if err := s.Incus.Do(ctx, http.MethodPost, "/1.0/projects", body, nil); err != nil {
 		return fmt.Errorf("create project %s: %w", s.Config.Project, err)
@@ -182,7 +208,7 @@ func (s *Setup) ensureProject(ctx context.Context) error {
 
 // projectConfig returns the full project configuration given the names of
 // the pools that exist in Incus (nil before pools are known).
-func (s *Setup) projectConfig(existing map[string]storagePool) map[string]string {
+func (s *Setup) projectConfig(existing map[string]storagePool, networks map[string]incusNetwork) map[string]string {
 	cfg := maps.Clone(s.Config.ProjectConfig)
 	if cfg == nil {
 		cfg = map[string]string{}
@@ -216,32 +242,44 @@ func (s *Setup) projectConfig(existing map[string]storagePool) map[string]string
 	} else {
 		cfg["restricted.storage-pools.access"] = strings.Join(allowed, ",")
 	}
+	cfg["restricted.networks.access"] = s.networkAccess(networks)
 	return cfg
 }
 
 // enforceProject replaces the project's configuration with the declared
 // one, reverting any change made by hand.
-func (s *Setup) enforceProject(ctx context.Context, existing map[string]storagePool) error {
-	body := project{Description: s.Config.ProjectDescription, Config: s.projectConfig(existing)}
+func (s *Setup) enforceProject(ctx context.Context, existing map[string]storagePool, networks map[string]incusNetwork) error {
+	body := project{Description: s.Config.ProjectDescription, Config: s.projectConfig(existing, networks)}
 	if err := s.Incus.Do(ctx, http.MethodPut, "/1.0/projects/"+url.PathEscape(s.Config.Project), body, nil); err != nil {
 		return fmt.Errorf("enforce project %s: %w", s.Config.Project, err)
 	}
 	s.Log.InfoContext(ctx, "project configuration enforced", "project", s.Config.Project,
-		"pools", body.Config["restricted.storage-pools.access"])
+		"pools", body.Config["restricted.storage-pools.access"], "networks", body.Config["restricted.networks.access"])
 	return nil
 }
 
 // enforceDefaultProfile puts the root disk of the project's default
-// profile on the default pool, if that pool exists, and reports whether
-// it changed the profile. Other devices and settings of the profile are
-// kept (they are subject to the project's restrictions).
-func (s *Setup) enforceDefaultProfile(ctx context.Context, existing map[string]storagePool) (bool, error) {
-	if s.Config.DefaultPool == "" {
-		return false, nil
+// profile on the default pool and its eth0 on the default network, each
+// only if declared and existing, and reports whether it changed the
+// profile. Other devices and settings of the profile are kept (they are
+// subject to the project's restrictions).
+func (s *Setup) enforceDefaultProfile(ctx context.Context, existing map[string]storagePool,
+	networks map[string]incusNetwork,
+) (bool, error) {
+	want := map[string]map[string]string{}
+	if _, ok := existing[s.Config.DefaultPool]; ok && s.Config.DefaultPool != "" {
+		want["root"] = map[string]string{"type": "disk", "path": "/", "pool": s.Config.DefaultPool}
+		if s.Config.RootSize != "" {
+			want["root"]["size"] = s.Config.RootSize
+		}
 	}
-	if _, ok := existing[s.Config.DefaultPool]; !ok {
-		return false, nil // reported as a pool error
+	if _, ok := networks[s.Config.DefaultNetwork]; ok && s.Config.DefaultNetwork != "" {
+		want["eth0"] = map[string]string{"type": "nic", "name": "eth0", "network": s.Config.DefaultNetwork}
 	}
+	if len(want) == 0 {
+		return false, nil // nothing declared, or reported as a pool or network error
+	}
+
 	path := "/1.0/profiles/default?project=" + url.QueryEscape(s.Config.Project)
 	var p struct {
 		Description string                       `json:"description"`
@@ -251,20 +289,24 @@ func (s *Setup) enforceDefaultProfile(ctx context.Context, existing map[string]s
 	if err := s.Incus.Do(ctx, http.MethodGet, path, nil, &p); err != nil {
 		return false, fmt.Errorf("default profile: %w", err)
 	}
-	want := map[string]string{"type": "disk", "path": "/", "pool": s.Config.DefaultPool}
-	if s.Config.RootSize != "" {
-		want["size"] = s.Config.RootSize
-	}
-	if maps.Equal(p.Devices["root"], want) {
-		return false, nil
-	}
 	if p.Devices == nil {
 		p.Devices = map[string]map[string]string{}
 	}
-	p.Devices["root"] = want
+	var changed []string
+	for name, dev := range want {
+		if !maps.Equal(p.Devices[name], dev) {
+			p.Devices[name] = dev
+			changed = append(changed, name)
+		}
+	}
+	if len(changed) == 0 {
+		return false, nil
+	}
 	if err := s.Incus.Do(ctx, http.MethodPut, path, p, nil); err != nil {
 		return false, fmt.Errorf("default profile: %w", err)
 	}
-	s.Log.InfoContext(ctx, "default profile root disk set", "pool", s.Config.DefaultPool)
+	slices.Sort(changed)
+	s.Log.InfoContext(ctx, "default profile updated", "devices", strings.Join(changed, ","),
+		"pool", s.Config.DefaultPool, "network", s.Config.DefaultNetwork)
 	return true, nil
 }

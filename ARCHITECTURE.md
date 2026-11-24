@@ -1,7 +1,8 @@
 # Strata Architecture
 
-**Status:** Milestone M1 complete; M2 in progress (slices 1–2: Incus host,
-the agent's restricted identity, storage pools). Incus is the workload backend (ADR-0015). This document describes the target
+**Status:** Milestone M1 complete; M2 in progress (slices 1–3: Incus host,
+the agent's restricted identity, storage pools, guest networks). Incus is the
+workload backend (ADR-0015). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
 
@@ -138,7 +139,8 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | `strata-install init` (interactive answer file wizard) | **Implemented** (M1 slice 4b, experimental) |
 | Physical hardware validation | **Passed** (M1 slice 5): Intel (Lenovo ThinkServer TS140) and AMD (GMKtec M6 Ultra). See [results](docs/installation/hardware-validation.md#results) |
 | `strata.storage` pools on dedicated disks (ZFS, LVM-thin, dir), project limits, LVM autoactivation policy | **Implemented** (M2 slice 2, experimental; ADR-0018) |
-| Guest networks, VM schema and lifecycle | Planned (M2 slices 3+), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
+| `strata.networking.guest` networks (Incus bridges on uplinks, untagged or VLAN, or isolated; no host address) | **Implemented** (M2 slice 3, experimental; ADR-0019) |
+| VM schema and lifecycle; NAT/routed guest networks; bonds | Planned (M2 slice 4; later), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
@@ -224,8 +226,9 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
    NixOS, created only on empty disks or adopted, never deleted; project
    limits; LVM autoactivation limited to declared pools (ADR-0018). The
    project setup moved from a shell script to `strata-host` (Go). **Done.**
-3. Guest networks: Incus-managed networks declared in NixOS, isolated from
-   the management interface. Planned.
+3. Guest networks: Incus bridges declared in NixOS, on uplinks (untagged
+   or VLAN) or isolated, with no host address; the project may use exactly
+   the declared networks (ADR-0019). **Done.**
 4. VM schema, the Incus provider and VM lifecycle through the CLI. Planned.
 
 ## Architecture decision records
@@ -380,6 +383,13 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
   are declared (M2 slice 3); `nixos-host` asserts there is no managed Incus
   network and no `incusbr0`, `nixos-incus` that port 8443 is closed from the
   management network.
+- **Update (M2 slice 3, ADR-0019):** guest networks are Incus bridges with
+  no host address. The interface-scoped firewall is unchanged (nothing is
+  opened on guest bridges); the bridges are only exempt from the
+  reverse-path filter, which would drop bridged traffic passing nftables
+  through `br_netfilter`. Uplinks and the VLAN interfaces Incus creates get
+  networkd units with no address and `KeepMaster`, so networkd neither
+  addresses nor detaches them.
 - **Known limitation:** disruptive network changes are not rolled back
   automatically yet. Recovery relies on NixOS generations (`nixos-rebuild
   test`, boot-menu rollback) and console access. Automatic rollback belongs to
@@ -770,3 +780,51 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
     (M5 monitoring).
   - ZFS on a host means the ZFS kernel module must exist for its kernel;
     nixpkgs kernel updates can lag ZFS releases.
+
+### ADR-0019: Guest networks bridged to uplinks, without a host address
+
+- **Status:** Accepted (M2 slice 3). Settles the guest networking question
+  of ADR-0015.
+- **Context:** CLAUDE.md §15 requires the management network to be isolated
+  from guest networking by default and forbids disruptive host network
+  changes without recovery. The restricted Strata project allows NICs only
+  on Incus-managed networks (`restricted.devices.nic=managed`).
+- **Decision:**
+  - **Declared in NixOS** (`strata.networking.guest.networks`), created by
+    `strata-host incus-setup` as Incus `bridge` networks with
+    `ipv4.address=none` and `ipv6.address=none`: no NAT, DHCP or DNS from
+    the host, and **no host address**. A network is bridged to an uplink NIC
+    (untagged), to a VLAN on it (`bridge.external_interfaces =
+    <uplink>.<vlan>/<uplink>/<vlan>`, created by Incus), or isolated.
+  - **The management interface is never an uplink** (evaluation and runtime).
+    An uplink is either untagged for one network or a VLAN trunk, never
+    both (a bridge port stops delivering frames to VLAN interfaces on it).
+    At runtime an uplink must exist and have no IP address.
+  - **Host side:** networkd brings uplinks up with no address of any kind
+    and `KeepMaster`; the VLAN interfaces Incus creates get the same (the
+    VM test found the kernel giving them IPv6 link-local addresses
+    otherwise). Guest bridges are exempt from the reverse-path filter.
+  - **Configuration is enforced** (unlike pools): a changed declaration
+    updates the network (PATCH), logged with old and new values. A
+    network holds no data; the change affects only guests, never the
+    host's management connectivity.
+  - **Never deleted:** an undeclared network stays open to the project
+    while its instances or profiles use it (Incus refuses otherwise), then
+    is closed (left out of `restricted.networks.access`; a reserved
+    sentinel when none is declared, since empty means "all").
+  - **Default profile:** `eth0` on `strata.networking.guest.defaultNetwork`.
+  - **Guests choose networks, not VLAN tags.** The restricted project
+    cannot forbid a NIC's `vlan` key; the VM test proves that a guest
+    tagging VLAN 20 on an untagged network does not reach VLAN 20 on the
+    trunk (bridge VLAN filtering), with a positive control.
+- **Deferred:** NAT or routed guest networks (host address, DHCP/DNS and
+  forward rules that keep guests away from the management network), bonds,
+  and VLAN or bonded management interfaces.
+- **Verified by:** `internal/hostsetup` unit tests (creation, enforcement,
+  refusals, undeclared networks, sentinel; mutation-checked),
+  `module-eval`, and the `nixos-networks` VM test (untagged, VLAN and
+  isolated networks with a peer; no host address on any guest-facing
+  interface; no path from guests to the host; no VLAN hopping; refusal of
+  undeclared networks, macvlan on the management NIC and network creation;
+  a declared change moving a network; a removed network staying while used;
+  networkd reload; reboot).

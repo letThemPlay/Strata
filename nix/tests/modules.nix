@@ -128,6 +128,29 @@ let
   sc = storage.config;
   state = sc.strata.compute.incus.setupState;
   storageFails = msg: st: hasFailure msg (storageWith st);
+  guestWith =
+    guest:
+    hostWith [
+      static
+      { strata.networking.guest = guest; }
+    ];
+  guest = guestWith {
+    defaultNetwork = "lan";
+    networks = {
+      lan.uplink = "eno2";
+      v20 = {
+        uplink = "eno3";
+        vlan = 20;
+      };
+      v30 = {
+        uplink = "eno3";
+        vlan = 30;
+      };
+      lab = { };
+    };
+  };
+  gc = guest.config;
+  guestFails = msg: g: hasFailure msg (guestWith g);
   lvmConf = sys: sys.config.environment.etc."lvm/lvm.conf".text or "";
   templateModules = [
     ../../templates/host/hardware-configuration.nix
@@ -371,6 +394,118 @@ let
           "p"
           "limit"
         ];
+
+    # ---- guest networks ----
+    "guest: valid networks have no failed assertions" = failedAssertions guest == [ ];
+    "guest: setup state lists networks and the management interface" =
+      let
+        s = gc.strata.compute.incus.setupState;
+        byName = lib.listToAttrs (map (n: lib.nameValuePair n.name n) s.networks);
+      in
+      byName.lan.uplink == "eno2"
+      && byName.lan.vlan == 0
+      && byName.v20.vlan == 20
+      && byName.lab.uplink == ""
+      && s.defaultNetwork == "lan"
+      && s.managementInterface == "eno1";
+    "guest: uplinks are up without any address" =
+      let
+        u = gc.systemd.network.networks."20-strata-uplink-eno3";
+      in
+      u.matchConfig.Name == "eno3"
+      && u.networkConfig.DHCP == "no"
+      && u.networkConfig.LinkLocalAddressing == "no"
+      && u.networkConfig.IPv6AcceptRA == false
+      && (u.address or [ ]) == [ ]
+      && u.linkConfig.RequiredForOnline == "no"
+      && u.networkConfig.KeepMaster
+      && gc.systemd.network.networks ? "20-strata-uplink-eno2";
+    "guest: Incus VLAN interfaces get no link-local address" =
+      let
+        v = gc.systemd.network.networks."21-strata-guest-vlans";
+      in
+      v.matchConfig.Name == "eno3.20 eno3.30"
+      && v.networkConfig.LinkLocalAddressing == "no"
+      && v.linkConfig.ActivationPolicy == "manual";
+    "guest: bridges are exempt from the reverse-path filter" =
+      lib.hasInfix ''iifname { "lab", "lan", "v20", "v30" } accept'' gc.networking.firewall.extraReversePathFilterRules;
+    "guest: no networks means no uplink units or exemptions" =
+      !(lib.any (lib.hasPrefix "20-strata-uplink") (lib.attrNames hc.systemd.network.networks))
+      && hc.networking.firewall.extraReversePathFilterRules == "";
+    "guest: the management interface cannot be an uplink" =
+      guestFails "the management interface (eno1) cannot be a guest uplink"
+        { networks.bad.uplink = "eno1"; };
+    "guest: an uplink is untagged for one network or carries VLANs" =
+      guestFails "is either untagged for one network or carries VLANs"
+        {
+          networks.a.uplink = "eno2";
+          networks.b = {
+            uplink = "eno2";
+            vlan = 5;
+          };
+        };
+    "guest: a VLAN ID is used once per uplink" = guestFails "a VLAN ID is used twice" {
+      networks.a = {
+        uplink = "eno2";
+        vlan = 5;
+      };
+      networks.b = {
+        uplink = "eno2";
+        vlan = 5;
+      };
+    };
+    "guest: a VLAN needs an uplink" = guestFails "a VLAN needs an uplink" { networks.a.vlan = 5; };
+    "guest: VLAN interface names fit 15 characters" = guestFails "is longer than 15 characters" {
+      networks.a = {
+        uplink = "enp129s0f1np1";
+        vlan = 100;
+      };
+    };
+    "guest: unknown default network fails" = guestFails "is not a declared network" {
+      defaultNetwork = "nope";
+      networks.a = { };
+    };
+    "guest: networks require compute" =
+      hasFailure "strata.networking.guest requires strata.compute.enable"
+        (eval [
+          {
+            strata = {
+              enable = true;
+              node.id = "hv-01";
+              networking = {
+                enable = true;
+                management.interface = "eno1";
+                management.addressing = "dhcp";
+                guest.networks.a = { };
+              };
+            };
+          }
+        ]);
+    "guest: network names are interface names" =
+      rejects (guestWith { networks."lan.20" = { }; }) [
+        "strata"
+        "networking"
+        "guest"
+        "networks"
+        "lan.20"
+        "name"
+      ]
+      && rejects (guestWith { networks.averyveryverylongname = { }; }) [
+        "strata"
+        "networking"
+        "guest"
+        "networks"
+        "averyveryverylongname"
+        "name"
+      ];
+    "guest: VLAN IDs are 1-4094" = rejects (guestWith { networks.a.vlan = 4095; }) [
+      "strata"
+      "networking"
+      "guest"
+      "networks"
+      "a"
+      "vlan"
+    ];
 
     # ---- access ----
     "access hardens sshd" =

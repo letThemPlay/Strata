@@ -29,6 +29,7 @@ type fakeIncus struct {
 	projects map[string]map[string]any
 	certs    []map[string]any
 	pools    map[string]storagePool
+	networks map[string]incusNetwork
 	profile  map[string]any
 	writes   []string
 	// failPool makes creating this pool fail like Incus would.
@@ -39,7 +40,12 @@ func newFakeIncus() *fakeIncus {
 	return &fakeIncus{
 		projects: map[string]map[string]any{},
 		pools:    map[string]storagePool{},
-		profile:  map[string]any{"description": "Default", "config": map[string]any{}, "devices": map[string]any{}},
+		networks: map[string]incusNetwork{
+			// Host interfaces appear as unmanaged networks.
+			"eth1": {Name: "eth1", Type: "physical"},
+			"eth2": {Name: "eth2", Type: "physical"},
+		},
+		profile: map[string]any{"description": "Default", "config": map[string]any{}, "devices": map[string]any{}},
 	}
 }
 
@@ -122,6 +128,36 @@ func (f *fakeIncus) Do(_ context.Context, method, path string, body, out any) er
 		}
 		f.pools[sp.Name] = sp
 		return nil
+	case method == http.MethodGet && p == "/1.0/networks":
+		list := []incusNetwork{}
+		for _, n := range f.networks {
+			list = append(list, n)
+		}
+		return roundTrip(list, out)
+	case method == http.MethodPost && p == "/1.0/networks":
+		var n incusNetwork
+		if err := roundTrip(b, &n); err != nil {
+			return err
+		}
+		n.Managed = true
+		f.networks[n.Name] = n
+		return nil
+	case method == http.MethodPatch && strings.HasPrefix(p, "/1.0/networks/"):
+		name := strings.TrimPrefix(p, "/1.0/networks/")
+		n := f.networks[name]
+		var patch map[string]string
+		if err := roundTrip(b["config"], &patch); err != nil {
+			return err
+		}
+		for k, v := range patch {
+			if v == "" {
+				delete(n.Config, k)
+			} else {
+				n.Config[k] = v
+			}
+		}
+		f.networks[name] = n
+		return nil
 	case p == "/1.0/profiles/default" && method == http.MethodGet:
 		return roundTrip(f.profile, out)
 	case p == "/1.0/profiles/default" && method == http.MethodPut:
@@ -136,6 +172,13 @@ func (f *fakeIncus) Do(_ context.Context, method, path string, body, out any) er
 				sp.UsedBy = append(sp.UsedBy, ref)
 			}
 			f.pools[name] = sp
+		}
+		for name, n := range f.networks {
+			n.UsedBy = slices.DeleteFunc(n.UsedBy, func(u string) bool { return u == ref })
+			if devices["eth0"]["network"] == name {
+				n.UsedBy = append(n.UsedBy, ref)
+			}
+			f.networks[name] = n
 		}
 		return nil
 	}
@@ -200,9 +243,20 @@ func noExec(context.Context, string, ...string) ([]byte, error) {
 	return nil, errors.New("unexpected command")
 }
 
+// fakeLinks: eth1 (management, addressed), eth2 and eth3 (unaddressed).
+func fakeLinks(name string) (Link, error) {
+	switch name {
+	case "eth1":
+		return Link{Exists: true, Addrs: []string{"192.168.1.2/24"}}, nil
+	case "eth2", "eth3":
+		return Link{Exists: true}, nil
+	}
+	return Link{}, nil
+}
+
 func run(t *testing.T, cfg Config, f *fakeIncus, root fs.FS) error {
 	t.Helper()
-	s := &Setup{Config: cfg, Incus: f, Root: root, Exec: noExec}
+	s := &Setup{Config: cfg, Incus: f, Root: root, Exec: noExec, Link: fakeLinks}
 	return s.Run(context.Background())
 }
 
@@ -398,7 +452,7 @@ func TestAdoption(t *testing.T) {
 	root["run/udev/data/b8:17"] = file("E:ID_FS_TYPE=zfs_member\nE:ID_FS_LABEL=tank\n")
 	root["run/udev/data/b8:32"] = file("E:ID_FS_TYPE=LVM2_member\n")
 	var ran []string
-	s := &Setup{Config: cfg, Incus: newFakeIncus(), Root: root, Exec: func(_ context.Context, name string, args ...string) ([]byte, error) {
+	s := &Setup{Config: cfg, Incus: newFakeIncus(), Root: root, Link: fakeLinks, Exec: func(_ context.Context, name string, args ...string) ([]byte, error) {
 		ran = append(ran, name+" "+strings.Join(args, " "))
 		return []byte("  vg0\n"), nil
 	}}
@@ -556,5 +610,151 @@ func TestDefaultPoolMoveClosesThePreviousPool(t *testing.T) {
 	want := []string{"PUT /1.0/projects/strata", "PUT /1.0/profiles/default", "PUT /1.0/projects/strata"}
 	if !slices.Equal(f.writes, want) {
 		t.Errorf("writes %v, want %v", f.writes, want)
+	}
+}
+
+func networksConfig(t *testing.T) Config {
+	t.Helper()
+	cfg, _ := baseConfig(t)
+	cfg.Pools, cfg.DefaultPool, cfg.RootSize = nil, "", ""
+	cfg.ManagementInterface = "eth1"
+	cfg.Networks = []Network{
+		{Name: "lan", Uplink: "eth2"},
+		{Name: "v20", Uplink: "eth3", VLAN: 20},
+		{Name: "lab"},
+	}
+	cfg.DefaultNetwork = "lan"
+	return cfg
+}
+
+func TestNetworksCreated(t *testing.T) {
+	cfg := networksConfig(t)
+	f := newFakeIncus()
+	if err := run(t, cfg, f, hostFS(t.TempDir())); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	for name, ext := range map[string]string{"lan": "eth2", "v20": "eth3.20/eth3/20", "lab": ""} {
+		n := f.networks[name]
+		if !n.Managed || n.Type != "bridge" || n.Config["ipv4.address"] != "none" || n.Config["ipv6.address"] != "none" ||
+			n.Config["bridge.external_interfaces"] != ext {
+			t.Errorf("network %s: %+v", name, n)
+		}
+	}
+	if got := projectConfig(t, f)["restricted.networks.access"]; got != "lab,lan,v20" {
+		t.Errorf("network access %q", got)
+	}
+	var devices map[string]map[string]string
+	_ = roundTrip(f.profile["devices"], &devices)
+	if devices["eth0"]["network"] != "lan" || devices["eth0"]["type"] != "nic" {
+		t.Errorf("default profile devices %v", devices)
+	}
+
+	// Unchanged: nothing but the project is written again.
+	f.writes = nil
+	if err := run(t, cfg, f, hostFS(t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(f.writes, []string{"PUT /1.0/projects/strata"}) {
+		t.Errorf("second run writes %v", f.writes)
+	}
+}
+
+func TestNetworkConfigIsEnforced(t *testing.T) {
+	cfg := networksConfig(t)
+	f := newFakeIncus()
+	if err := run(t, cfg, f, hostFS(t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	// Changed by hand, and the declaration moves lan to a VLAN.
+	f.networks["lan"].Config["ipv4.address"] = "10.0.0.1/24"
+	cfg.Networks[0] = Network{Name: "lan", Uplink: "eth3", VLAN: 30}
+	f.writes = nil
+	if err := run(t, cfg, f, hostFS(t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	n := f.networks["lan"]
+	if n.Config["ipv4.address"] != "none" || n.Config["bridge.external_interfaces"] != "eth3.30/eth3/30" {
+		t.Errorf("lan not enforced: %v", n.Config)
+	}
+	if !slices.Contains(f.writes, "PATCH /1.0/networks/lan") {
+		t.Errorf("writes %v", f.writes)
+	}
+}
+
+func TestNetworkRefusals(t *testing.T) {
+	for name, tc := range map[string]struct {
+		net  Network
+		want string
+	}{
+		"management uplink": {Network{Name: "bad", Uplink: "eth1"}, "uplink eth1 is the management interface"},
+		"missing uplink":    {Network{Name: "bad", Uplink: "eth9"}, "uplink eth9 does not exist"},
+		"addressed uplink": {
+			Network{Name: "bad", Uplink: "eth4"}, "uplink eth4 has IP addresses (10.0.0.5/24)",
+		},
+		"host interface name": {Network{Name: "eth2"}, "a host interface or a non-bridge network of this name exists"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := networksConfig(t)
+			cfg.ManagementInterface = "eth1"
+			cfg.Networks = append(cfg.Networks, tc.net)
+			f := newFakeIncus()
+			s := &Setup{Config: cfg, Incus: f, Root: hostFS(t.TempDir()), Exec: noExec, Link: func(n string) (Link, error) {
+				if n == "eth4" {
+					return Link{Exists: true, Addrs: []string{"10.0.0.5/24"}}, nil
+				}
+				return fakeLinks(n)
+			}}
+			err := s.Run(context.Background())
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("expected %q, got %v", tc.want, err)
+			}
+			if _, ok := f.networks["lan"]; !ok {
+				t.Error("a refusal must not stop the other networks")
+			}
+			if n, ok := f.networks[tc.net.Name]; ok && n.Managed {
+				t.Errorf("refused network created: %+v", n)
+			}
+		})
+	}
+}
+
+func TestUndeclaredNetworks(t *testing.T) {
+	cfg := networksConfig(t)
+	f := newFakeIncus()
+	f.networks["manual"] = incusNetwork{Name: "manual", Type: "bridge", Managed: true, Config: map[string]string{}}
+	f.networks["old"] = incusNetwork{
+		Name: "old", Type: "bridge", Managed: true, Config: map[string]string{},
+		UsedBy: []string{"/1.0/instances/c1?project=strata"},
+	}
+	if err := run(t, cfg, f, hostFS(t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	// manual is closed; old is still used by the project and stays open.
+	if got := projectConfig(t, f)["restricted.networks.access"]; got != "lab,lan,old,v20" {
+		t.Errorf("network access %q", got)
+	}
+	if _, ok := f.networks["manual"]; !ok {
+		t.Error("an undeclared network must not be deleted")
+	}
+
+	cfg.Networks, cfg.DefaultNetwork = nil, ""
+	delete(f.networks, "old")
+	if err := run(t, cfg, f, hostFS(t.TempDir())); err != nil {
+		t.Fatal(err)
+	}
+	// lan is still used by the default profile; the others are closed.
+	if got := projectConfig(t, f)["restricted.networks.access"]; got != "lan" {
+		t.Errorf("network access %q", got)
+	}
+}
+
+func TestNoNetworksSentinel(t *testing.T) {
+	cfg, mount := baseConfig(t)
+	f := newFakeIncus()
+	if err := run(t, cfg, f, hostFS(mount)); err != nil {
+		t.Fatal(err)
+	}
+	if got := projectConfig(t, f)["restricted.networks.access"]; got != NoNetworksSentinel {
+		t.Errorf("network access %q", got)
 	}
 }

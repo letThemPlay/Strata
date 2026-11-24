@@ -18,6 +18,7 @@ let
     " --incus-address ${cfg.compute.incus.address}"
     + " --incus-project ${cfg.compute.incus.project}"
     + " --incus-credentials %d"
+    + " --api-group strata-operators"
   );
 in
 {
@@ -33,11 +34,34 @@ in
       }
     ];
 
+    # The local API (ADR-0020): systemd owns the socket, so the agent needs
+    # no privilege to create it. Members of strata-operators may connect.
+    users.groups.strata-operators = lib.mkIf incus { };
+    systemd.sockets.strata-agent = lib.mkIf incus {
+      description = "Strata agent local API";
+      wantedBy = [ "sockets.target" ];
+      socketConfig = {
+        ListenStream = "/run/strata/agent.sock";
+        SocketUser = "root";
+        SocketGroup = "strata-operators";
+        SocketMode = "0660";
+        DirectoryMode = "0755";
+        Service = "strata-agent.service";
+      };
+    };
+
     systemd.services.strata-agent = {
       description = "Strata node agent";
       wantedBy = [ "multi-user.target" ];
-      after = [ "local-fs.target" ] ++ lib.optional incus "strata-incus-setup.service";
+      after = [
+        "local-fs.target"
+      ]
+      ++ lib.optionals incus [
+        "strata-incus-setup.service"
+        "strata-agent.socket"
+      ];
       wants = lib.optional incus "strata-incus-setup.service";
+      requires = lib.optional incus "strata-agent.socket";
 
       serviceConfig = {
         Type = "simple";
@@ -67,6 +91,7 @@ in
           "AF_INET"
           "AF_INET6"
         ];
+        Sockets = lib.mkIf incus [ "strata-agent.socket" ];
         IPAddressDeny = "any";
         IPAddressAllow = lib.mkIf incus "localhost";
         LoadCredential = lib.mkIf incus [

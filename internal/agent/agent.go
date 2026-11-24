@@ -14,11 +14,13 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
 	"reflect"
 	"time"
 
+	"github.com/letthemplay/Strata/internal/agent/api"
 	"github.com/letthemplay/Strata/internal/hardware"
 )
 
@@ -46,6 +48,9 @@ type Options struct {
 	// Backend checks the workload backend in every cycle. Nil means the
 	// node has no workload backend.
 	Backend BackendCheck
+	// API, if set, is served on APIListener (the local API, ADR-0020).
+	API         *api.Server
+	APIListener net.Listener
 }
 
 // Run performs an initial discovery, then repeats discovery every Interval
@@ -79,8 +84,12 @@ func Run(ctx context.Context, opts Options) error {
 	} else if err := removeBackendStatus(opts.StateDir); err != nil {
 		return err
 	}
+	apiErr := make(chan error, 1)
+	if opts.API != nil && opts.APIListener != nil {
+		go func() { apiErr <- opts.API.Serve(ctx, opts.APIListener) }()
+	}
 	log.InfoContext(ctx, "agent started", "stateDir", opts.StateDir, "interval", opts.Interval.String(),
-		"backend", opts.Backend != nil)
+		"backend", opts.Backend != nil, "api", opts.APIListener != nil)
 
 	var tick <-chan time.Time
 	if opts.Interval > 0 {
@@ -93,7 +102,14 @@ func Run(ctx context.Context, opts Options) error {
 		select {
 		case <-ctx.Done():
 			log.InfoContext(ctx, "agent stopping")
+			if opts.API != nil && opts.APIListener != nil {
+				if err := <-apiErr; err != nil {
+					return err
+				}
+			}
 			return nil
+		case err := <-apiErr:
+			return fmt.Errorf("agent: %w", err)
 		case <-opts.Reload:
 			log.InfoContext(ctx, "reload requested")
 		case <-tick:

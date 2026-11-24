@@ -1,0 +1,413 @@
+// Package api is the agent's local API (ADR-0020): versioned HTTP+JSON on
+// a Unix socket that systemd creates (group strata-operators, mode 0660)
+// and hands to the agent. The strata CLI uses it until the management API
+// (M5) exists; its paths match the planned /api/v1 resources.
+//
+// Every request is authorized by the caller's uid (SO_PEERCRED) and
+// written to the audit log. Changes run as operations with an ID; success
+// is reported only after the provider has verified the result.
+package api
+
+import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"strconv"
+	"sync"
+	"syscall"
+	"time"
+
+	"github.com/letthemplay/Strata/internal/workload"
+)
+
+// Limits.
+const (
+	maxBodyBytes     = 64 << 10
+	operationTimeout = 15 * time.Minute
+	keepOperations   = 1000
+	// DefaultStopTimeout is how long a graceful stop waits for the guest.
+	DefaultStopTimeout = 60
+)
+
+// VMs is a workload provider for VMs (incus.Client implements it).
+type VMs interface {
+	ListVMs(ctx context.Context) ([]workload.VMStatus, error)
+	GetVM(ctx context.Context, name string) (workload.VMStatus, error)
+	CreateVM(ctx context.Context, vm workload.VM) error
+	VMAction(ctx context.Context, name, action string, force bool, timeoutSeconds int) error
+}
+
+// Server is the local API.
+type Server struct {
+	// Provider returns the VM provider and a function that releases it.
+	// It fails when the node has no workload backend.
+	Provider func() (VMs, func(), error)
+	// Authorize returns nil if the caller with uid may use the API.
+	Authorize func(uid uint32) error
+	Log       *slog.Logger
+
+	mu  sync.Mutex
+	ops map[string]*Operation
+	// busy holds the VMs with an operation in progress.
+	busy  map[string]string
+	order []string
+	// base is the context operations run in (canceled on shutdown).
+	base context.Context
+}
+
+// Operation states (CLAUDE.md §9). Validation happens before an operation
+// is accepted; providers verify within APPLYING.
+const (
+	StatusPending   = "PENDING"
+	StatusApplying  = "APPLYING"
+	StatusSucceeded = "SUCCEEDED"
+	StatusFailed    = "FAILED"
+)
+
+// Operation is a change in progress or done.
+type Operation struct {
+	ID          string    `json:"id"`
+	Type        string    `json:"type"`
+	Resource    string    `json:"resource"`
+	Status      string    `json:"status"`
+	Error       string    `json:"error,omitempty"`
+	CreatedAt   time.Time `json:"createdAt"`
+	CompletedAt time.Time `json:"completedAt,omitzero"`
+	// UID is the caller who requested it.
+	UID uint32 `json:"uid"`
+}
+
+func (o Operation) done() bool { return o.Status == StatusSucceeded || o.Status == StatusFailed }
+
+// ErrorResponse is the body of every error reply.
+type ErrorResponse struct {
+	Error string `json:"error"`
+	Code  string `json:"code"`
+}
+
+// Serve serves the API on l until ctx is canceled, then shuts down
+// gracefully (waiting up to 10 seconds for requests in flight).
+func (s *Server) Serve(ctx context.Context, l net.Listener) error {
+	s.init()
+	s.mu.Lock()
+	if s.base == nil {
+		s.base = ctx
+	}
+	s.mu.Unlock()
+	srv := &http.Server{
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		WriteTimeout:      60 * time.Second,
+		ConnContext:       withPeer,
+		BaseContext:       func(net.Listener) context.Context { return ctx },
+	}
+	errc := make(chan error, 1)
+	go func() { errc <- srv.Serve(l) }()
+	select {
+	case err := <-errc:
+		return fmt.Errorf("api: %w", err)
+	case <-ctx.Done():
+		shutdown, cancel := context.WithTimeout(context.WithoutCancel(ctx), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdown); err != nil {
+			return fmt.Errorf("api: shutdown: %w", err)
+		}
+		return nil
+	}
+}
+
+func (s *Server) init() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.ops == nil {
+		s.ops, s.busy = map[string]*Operation{}, map[string]string{}
+	}
+	if s.Log == nil {
+		s.Log = slog.New(slog.DiscardHandler)
+	}
+}
+
+// Handler returns the API's HTTP handler.
+func (s *Server) Handler() http.Handler {
+	s.init()
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v1/vms", s.listVMs)
+	mux.HandleFunc("POST /api/v1/vms", s.createVM)
+	mux.HandleFunc("GET /api/v1/vms/{name}", s.getVM)
+	mux.HandleFunc("POST /api/v1/vms/{name}/{action}", s.vmAction)
+	mux.HandleFunc("GET /api/v1/operations/{id}", s.getOperation)
+	return s.authorize(mux)
+}
+
+// peer is the caller's credentials from SO_PEERCRED.
+type peer struct {
+	uid uint32
+	ok  bool
+}
+
+type peerKey struct{}
+
+// withPeer reads the caller's credentials from a Unix connection.
+func withPeer(ctx context.Context, c net.Conn) context.Context {
+	p := peer{}
+	if uc, ok := c.(*net.UnixConn); ok {
+		if raw, err := uc.SyscallConn(); err == nil {
+			_ = raw.Control(func(fd uintptr) {
+				cred, err := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
+				if err == nil {
+					p = peer{uid: cred.Uid, ok: true}
+				}
+			})
+		}
+	}
+	return context.WithValue(ctx, peerKey{}, p)
+}
+
+func peerOf(r *http.Request) peer {
+	p, _ := r.Context().Value(peerKey{}).(peer)
+	return p
+}
+
+// statusRecorder captures the status code for the audit log.
+type statusRecorder struct {
+	http.ResponseWriter
+	code int
+}
+
+func (r *statusRecorder) WriteHeader(code int) {
+	r.code = code
+	r.ResponseWriter.WriteHeader(code)
+}
+
+func (s *Server) authorize(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		p := peerOf(r)
+		rec := &statusRecorder{ResponseWriter: w, code: http.StatusOK}
+		defer func(ctx context.Context) {
+			s.Log.InfoContext(ctx, "audit", "uid", p.uid, "method", r.Method, "path", r.URL.Path,
+				"status", rec.code, "operation", rec.Header().Get("X-Strata-Operation"))
+		}(r.Context())
+		switch {
+		case !p.ok:
+			writeError(rec, http.StatusForbidden, "forbidden", errors.New("caller credentials unavailable"))
+			return
+		case s.Authorize != nil:
+			if err := s.Authorize(p.uid); err != nil {
+				writeError(rec, http.StatusForbidden, "forbidden", err)
+				return
+			}
+		}
+		r.Body = http.MaxBytesReader(rec, r.Body, maxBodyBytes)
+		next.ServeHTTP(rec, r)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeError(w http.ResponseWriter, code int, kind string, err error) {
+	writeJSON(w, code, ErrorResponse{Error: err.Error(), Code: kind})
+}
+
+// writeProviderError maps provider errors to HTTP replies.
+func writeProviderError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, workload.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found", err)
+	case errors.Is(err, workload.ErrExists):
+		writeError(w, http.StatusConflict, "exists", err)
+	default:
+		writeError(w, http.StatusBadGateway, "backend", err)
+	}
+}
+
+func (s *Server) provider(w http.ResponseWriter) (VMs, func(), bool) {
+	if s.Provider == nil {
+		writeError(w, http.StatusServiceUnavailable, "no_backend", errors.New("this node has no workload backend (strata.compute)"))
+		return nil, nil, false
+	}
+	p, release, err := s.Provider()
+	if err != nil {
+		writeError(w, http.StatusServiceUnavailable, "no_backend", err)
+		return nil, nil, false
+	}
+	return p, release, true
+}
+
+func (s *Server) listVMs(w http.ResponseWriter, r *http.Request) {
+	p, release, ok := s.provider(w)
+	if !ok {
+		return
+	}
+	defer release()
+	list, err := p.ListVMs(r.Context())
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, list)
+}
+
+func (s *Server) getVM(w http.ResponseWriter, r *http.Request) {
+	p, release, ok := s.provider(w)
+	if !ok {
+		return
+	}
+	defer release()
+	vm, err := p.GetVM(r.Context(), r.PathValue("name"))
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, vm)
+}
+
+func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
+	vm, err := workload.ParseVM(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err)
+		return
+	}
+	s.start(w, r, "create", vm.Name, func(ctx context.Context, p VMs) error { return p.CreateVM(ctx, vm) })
+}
+
+func (s *Server) vmAction(w http.ResponseWriter, r *http.Request) {
+	name, action := r.PathValue("name"), r.PathValue("action")
+	switch action {
+	case workload.ActionStart, workload.ActionStop, workload.ActionRestart:
+	default:
+		writeError(w, http.StatusNotFound, "not_found", fmt.Errorf("unknown action %q", action))
+		return
+	}
+	force := r.URL.Query().Get("force") == "true"
+	timeout := DefaultStopTimeout
+	if t := r.URL.Query().Get("timeout"); t != "" {
+		n, err := strconv.Atoi(t)
+		if err != nil || n < 0 || n > 3600 {
+			writeError(w, http.StatusBadRequest, "invalid", fmt.Errorf("timeout must be 0-3600 seconds, got %q", t))
+			return
+		}
+		timeout = n
+	}
+	s.start(w, r, action, name, func(ctx context.Context, p VMs) error {
+		return p.VMAction(ctx, name, action, force, timeout)
+	})
+}
+
+// start runs fn as an operation on VM name and replies 202 with it.
+func (s *Server) start(w http.ResponseWriter, r *http.Request, kind, name string, fn func(context.Context, VMs) error) {
+	p, release, ok := s.provider(w)
+	if !ok {
+		return
+	}
+	id, err := newID()
+	if err != nil {
+		release()
+		writeError(w, http.StatusInternalServerError, "internal", err)
+		return
+	}
+	op := &Operation{ID: id, Type: kind, Resource: "vms/" + name, Status: StatusPending, CreatedAt: time.Now().UTC(), UID: peerOf(r).uid}
+
+	s.mu.Lock()
+	if other, busy := s.busy[name]; busy {
+		s.mu.Unlock()
+		release()
+		writeError(w, http.StatusConflict, "busy", fmt.Errorf("vm %s: operation %s is in progress", name, other))
+		return
+	}
+	s.busy[name] = id
+	s.ops[id] = op
+	s.order = append(s.order, id)
+	s.prune()
+	snapshot := *op
+	// Operations outlive the request: they run in the server's context
+	// (canceled on shutdown), or without the request's cancellation.
+	base := s.base //nolint:contextcheck // Deliberate: operations outlive the request (see above).
+	if base == nil {
+		base = context.WithoutCancel(r.Context())
+	}
+	s.mu.Unlock()
+
+	go func(base context.Context) {
+		defer release()
+		ctx, cancel := context.WithTimeout(base, operationTimeout)
+		defer cancel()
+		s.update(id, func(o *Operation) { o.Status = StatusApplying })
+		err := fn(ctx, p)
+		s.update(id, func(o *Operation) {
+			o.CompletedAt = time.Now().UTC()
+			if err != nil {
+				o.Status, o.Error = StatusFailed, err.Error()
+			} else {
+				o.Status = StatusSucceeded
+			}
+		})
+		s.mu.Lock()
+		delete(s.busy, name)
+		final := *s.ops[id]
+		s.mu.Unlock()
+		s.Log.InfoContext(ctx, "operation finished", "operation", id, "type", kind, "resource", final.Resource,
+			"status", final.Status, "error", final.Error, "uid", final.UID)
+	}(base)
+	w.Header().Set("X-Strata-Operation", id)
+	writeJSON(w, http.StatusAccepted, snapshot)
+}
+
+func (s *Server) update(id string, fn func(*Operation)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	fn(s.ops[id])
+}
+
+// prune drops the oldest finished operations beyond keepOperations.
+// Called with s.mu held.
+func (s *Server) prune() {
+	for len(s.order) > keepOperations {
+		dropped := false
+		for i, id := range s.order {
+			if s.ops[id].done() {
+				delete(s.ops, id)
+				s.order = append(s.order[:i], s.order[i+1:]...)
+				dropped = true
+				break
+			}
+		}
+		if !dropped {
+			return
+		}
+	}
+}
+
+func (s *Server) getOperation(w http.ResponseWriter, r *http.Request) {
+	s.mu.Lock()
+	op, ok := s.ops[r.PathValue("id")]
+	var snapshot Operation
+	if ok {
+		snapshot = *op
+	}
+	s.mu.Unlock()
+	if !ok {
+		writeError(w, http.StatusNotFound, "not_found", errors.New("no such operation"))
+		return
+	}
+	writeJSON(w, http.StatusOK, snapshot)
+}
+
+func newID() (string, error) {
+	b := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, b); err != nil {
+		return "", fmt.Errorf("operation id: %w", err)
+	}
+	return hex.EncodeToString(b), nil
+}

@@ -51,6 +51,9 @@ let
     "restricted.idmap.uid" = "";
     "restricted.idmap.gid" = "";
     "restricted.cluster.target" = "block";
+    # No remote image server: Incus would download on the project's behalf.
+    # Only images imported into the project can be used (ADR-0021).
+    "restricted.images.servers" = "strata-no-image-servers.invalid";
     # Snapshots stay inside the pool; backup export belongs to the backup
     # design (M7).
     "restricted.snapshots" = "allow";

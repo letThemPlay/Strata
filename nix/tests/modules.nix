@@ -507,6 +507,31 @@ let
       "vlan"
     ];
 
+    # ---- local API (VMs) ----
+    "api: the agent gets its socket from systemd, group strata-operators" =
+      let
+        sock = hc.systemd.sockets.strata-agent.socketConfig;
+        svc = hc.systemd.services.strata-agent;
+      in
+      sock.ListenStream == "/run/strata/agent.sock"
+      && sock.SocketGroup == "strata-operators"
+      && sock.SocketMode == "0660"
+      && svc.serviceConfig.Sockets == [ "strata-agent.socket" ]
+      && lib.elem "strata-agent.socket" svc.requires
+      && lib.hasInfix "--api-group strata-operators" svc.serviceConfig.ExecStart
+      && hc.users.groups ? strata-operators;
+    "api: the admin is a strata operator" =
+      lib.elem "strata-operators" hc.users.users.strata-admin.extraGroups;
+    "api: the agent sandbox still allows only loopback" =
+      let
+        s = hc.systemd.services.strata-agent.serviceConfig;
+      in
+      s.IPAddressDeny == "any" && s.IPAddressAllow == "localhost" && s.CapabilityBoundingSet == "";
+    "api: no socket or group without compute" =
+      !(valid.config.systemd.sockets ? strata-agent) && !(valid.config.users.groups ? strata-operators);
+    "api: no remote image servers" =
+      state.projectConfig."restricted.images.servers" == "strata-no-image-servers.invalid";
+
     # ---- access ----
     "access hardens sshd" =
       let

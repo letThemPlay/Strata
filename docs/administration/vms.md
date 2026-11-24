@@ -85,6 +85,10 @@ strata.compute.incus.imageServers = [ "images.linuxcontainers.org" ];
 
 Incus downloads the image over HTTPS (simplestreams) and refuses servers
 that are not listed (`Image server "..." isn't allowed in this project`).
+The `cloud` images there run cloud-init (DHCP, your SSH keys for the
+`debian`/`ubuntu` user) but do not include an SSH server: install it once
+with `sudo incus exec NAME --project strata -- apt-get install -y
+openssh-server`, or use an image that has one.
 Only list servers you trust: an image runs as the VM's operating system.
 
 ## Lifecycle

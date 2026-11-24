@@ -96,6 +96,12 @@ nixos-rebuild switch --flake .#$(hostname)`). It needs a spare disk for a
 storage pool and a NIC other than the management interface (or an isolated
 network if there is none).
 
+**After adding hardware, check the interface and disk names first**
+(`ip -br link`, `ls -l /dev/disk/by-id/`): PCI-path NIC names (`enp3s0`)
+and kernel disk names (`nvme0n1`) can change when a device is added. Disks
+are always named by `by-id`; NIC names are not stable yet (see the M2
+notes below).
+
 1. **Declare a pool and a guest network** in `/etc/nixos/host.nix`, then
    rebuild:
 
@@ -105,17 +111,26 @@ network if there is none).
    ```
 
    Expected: `systemctl --failed` lists nothing; `sudo incus storage list`
-   and `sudo incus network list` show them.
-2. **Import an image** (for example one built with nixpkgs'
-   `incus-virtual-machine-image.nix`, or downloaded on another machine):
-   `sudo incus image import META.tar.xz DISK.qcow2 --alias test --project strata`.
+   and `sudo incus network list` show them. **The first ZFS pool on a host
+   needs a reboot after the rebuild** (the running system cannot load the
+   newly added ZFS module); `strata-incus-setup` fails with `Module zfs not
+   found` until then.
+2. **Provide an image:** import one (for example built with nixpkgs'
+   `incus-virtual-machine-image.nix`): `sudo incus image import META.tar.xz
+   DISK.qcow2 --alias test --project strata`; or allow a server
+   (`strata.compute.incus.imageServers = [ "images.linuxcontainers.org" ];`)
+   and use `"image": "debian/13/cloud", "imageServer":
+   "images.linuxcontainers.org"` in the spec.
 3. **Create and start** as the admin: write a spec (see
    [VMs](../administration/vms.md)) with a root disk, a 1 GiB data disk and
    a NIC on `lan`; `strata vm create -f vm.json`, `strata vm start NAME`.
    Expected: `strata vm list` shows it `Running`.
 4. **Reach it:** from another machine on the guest network, ping or SSH to
-   the guest (its address from your DHCP server or its console:
-   `sudo incus console NAME --project strata`).
+   the guest (its address is in `strata vm list` once the guest agent or
+   DHCP reports it, or use `sudo incus console NAME --project strata`).
+   Images from `images.linuxcontainers.org` do not include an SSH server:
+   install it with `sudo incus exec NAME --project strata -- apt-get install
+   -y openssh-server` first.
 5. **Update:** raise CPU and memory in the spec; `strata vm update -f
    vm.json` shows a plan with `restart`; confirm. Expected: the guest
    reports the new CPU count and memory.
@@ -184,4 +199,47 @@ hardware run of the fixes from the TS140 run.
 
 | Date | Commit | Machine | Pool (driver, disk) | Guest network | Image | Result | Notes |
 |---|---|---|---|---|---|---|---|
-| | | | | | | | |
+| 2026-11-24 | `main` after PR #15 (`58f26f6`) | GMKtec M6 Ultra (AMD Ryzen 5 7640HS) | `zfs`, Crucial P3 1 TB NVMe (added for the test) | `lan`, untagged on `enp4s0` (Realtek r8169), DHCP from the LAN | `debian/13/cloud` from `images.linuxcontainers.org` (allow-listed) | **Pass** | See below |
+
+### GMKtec M6 Ultra (AMD), M2, 2026-11-24
+
+The host from the M1 run, updated to `main` after PR #15, with a second
+NVMe drive added. All seven steps passed, run as `strata-admin` through
+`strata vm`:
+
+- **1:** the new disk held a Windows installation; it was wiped by hand
+  (`wipefs -a` on its partitions and the disk), as Strata never erases
+  disks. The pool `vms` (ZFS) was then created on it. The first attempt
+  failed with `Module zfs not found in /run/booted-system`: the first ZFS
+  pool on a host needs a reboot after the rebuild (now documented). After
+  the reboot: pool online, nothing failed.
+- **1 (network):** adding the drive renamed the second NIC from `enp3s0` to
+  `enp4s0` (and the Wi-Fi from `wlp2s0` to `wlp3s0`); `eno1` (management)
+  kept its name. `strata-incus-setup` refused the declared uplink
+  (`uplink enp3s0 does not exist`) instead of guessing; with `enp4s0` the
+  `lan` bridge was created with no host address. See the follow-ups below.
+- **2-3:** `test-01` (2 CPUs, 2 GiB, a 10 GiB root disk and a 1 GiB data
+  disk on `vms`, NIC on `lan`, cloud-init SSH key) was created from the
+  allow-listed server and started; it got addresses from the LAN's DHCP
+  and IPv6.
+- **4:** SSH from the workstation was refused at first: the Debian cloud
+  image has no SSH server. After installing `openssh-server` in the guest
+  (`incus exec`), SSH with the key from the spec worked; the guest showed
+  the 10 GiB root disk and the 1 GiB data disk.
+- **5:** `strata vm update` showed the plan (CPU 2 -> 4, memory 2 -> 4 GiB,
+  both with restart) and applied it; the guest reported 4 CPUs and about
+  4 GiB.
+- **6:** after a host reboot `test-01` was running again (autostart), with
+  its addresses; no failed units.
+- **7:** a delete without `--confirm` was refused; with it, the VM and its
+  root disk were deleted and `vms/test-01-data` was kept and listed.
+
+Follow-ups (not blocking M2):
+
+- **Stable NIC names:** a hardware change renamed a PCI-path NIC. Had it
+  been the management interface, the host would have lost its management
+  network. Proposed: name interfaces by MAC address (systemd `.link` files
+  written by the installer and Strata), with a test.
+- **cloud-init packages:** the VM spec passes only SSH keys to cloud-init;
+  images without an SSH server need another step. Proposed: an optional
+  `cloudInit.packages` list in the spec (additive).

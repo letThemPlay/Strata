@@ -51,7 +51,7 @@ func Subcommands(root fs.FS) []cli.Subcommand {
 			}
 			client := incus.NewUnix(*socket, "", requestTimeout)
 			defer client.Close()
-			s := &Setup{Config: cfg, Incus: client, Root: root, Exec: runCommand, Log: log}
+			s := &Setup{Config: cfg, Incus: client, Root: root, Exec: runCommand, Link: HostLink, Log: log}
 			if err := s.Run(ctx); err != nil {
 				log.ErrorContext(ctx, "incus setup incomplete", "error", err)
 				return cli.ExitError

@@ -109,8 +109,10 @@ What `strata.compute` sets up:
   project. The agent reads them as systemd credentials and reports in
   `/var/lib/strata/backend.json` whether Incus is reachable and trusts it.
   It never uses the Incus Unix socket (ADR-0017).
-- **Storage pools** come from [`strata.storage`](#storage). Without a pool,
-  instances cannot be created. **No guest networks yet** (a later M2 slice).
+- **Storage pools** come from [`strata.storage`](#storage), **guest
+  networks** from [`strata.networking.guest`](#guest-networks). Without a
+  pool, instances cannot be created; the project may use only the declared
+  pools and networks.
 - Restarting `incus.service` does not stop instances.
 
 KVM modules are not configured: udev loads `kvm-intel` or `kvm-amd` from the
@@ -194,6 +196,26 @@ the M3 executor). Until then:
   the boot menu, or run `nixos-rebuild switch --rollback` from the console.
 - Keep out-of-band console access (IPMI/BMC or physical) for hypervisors.
 
+## Guest networks
+
+Incus bridges for workloads, created by `strata-incus-setup.service`. The
+host has no address on them. See the [networking guide](networking.md).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.networking.guest.networks.<name>.uplink` | null or interface name | `null` | Host NIC the network is bridged to; never the management interface. `null`: isolated (guests on this host only). `<name>` becomes the bridge name (at most 15 characters; letters, digits, `-`, `_`). |
+| `strata.networking.guest.networks.<name>.vlan` | null or 1–4094 | `null` | VLAN ID, tagged on the uplink. `null`: untagged. |
+| `strata.networking.guest.defaultNetwork` | null or network name | `null` | Network for `eth0` of new instances (the project's default profile). |
+
+Checked at evaluation: the management interface is not an uplink; an uplink
+is either untagged for one network or carries VLANs (unique IDs), not both;
+`<uplink>.<vlan>` fits in 15 characters; a VLAN needs an uplink; the default
+network exists; guest networks require `strata.compute` and
+`strata.networking`. Uplinks get a networkd unit with no address
+(`20-strata-uplink-<if>`), the VLAN interfaces Incus creates likewise
+(`21-strata-guest-vlans`), and guest bridges are exempt from the
+reverse-path filter.
+
 ## Disk
 
 | Option | Type | Default | Description |
@@ -233,6 +255,7 @@ evaluation. systemd-boot keeps at most 10 generations
 - `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, Incus, KVM).
 - `checks.<system>.nixos-incus`: VM test of Incus and the agent's restricted identity (allowed and refused operations, loopback-only API, configuration enforcement).
 - `checks.<system>.nixos-storage`: VM test of storage pools (ZFS mirror, LVM-thin, dir; refusals; adoption; removal; LVM autoactivation; reboot).
+- `checks.<system>.nixos-networks`: VM test of guest networks (untagged, VLAN and isolated networks; no host address; no VLAN hopping; access refusals; changes; reboot).
 - `checks.<system>.reference-host`: builds the reference host (the `host` template plus test values).
 - `checks.x86_64-linux.nixos-install-ext4`: formats an empty disk with the `ext4` layout, installs the reference host and boots it under UEFI.
 - `checks.x86_64-linux.nixos-installer`: installs a host with the installer ISO, offline, and boots it.

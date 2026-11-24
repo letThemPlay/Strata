@@ -34,6 +34,14 @@
     # Workload storage pools on dedicated disks (never the system disk).
     # Disks must be empty; Strata never erases them. See
     # docs/administration/storage.md.
+    # Guest networks: bridged to a NIC other than the management
+    # interface (untagged, or a VLAN), or isolated. The host has no address
+    # on them. See docs/administration/networking.md.
+    # networking.guest = {
+    #   defaultNetwork = "lan";
+    #   networks.lan.uplink = "enp3s0";
+    # };
+
     # storage = {
     #   defaultPool = "fast";
     #   pools.fast = {

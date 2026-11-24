@@ -170,8 +170,8 @@ pkgs.testers.runNixOSTest {
         hv01.wait_for_unit("incus.service")
         hv01.wait_for_unit("strata-incus-setup.service")
         hv01.fail("systemctl cat libvirtd.service")
-        # Guest networks are declared by Strata (later M2 slice); until then
-        # Incus must not create any, in particular no NAT bridge.
+        # Guest networks exist only when declared (strata.networking.guest);
+        # Incus must not create any by itself, in particular no NAT bridge.
         managed = hv01.succeed(
             "incus query '/1.0/networks?recursion=1' | jq -r '.[] | select(.managed) | .name'"
         ).strip()

@@ -99,6 +99,15 @@ let
     }) (lib.attrValues cfg.storage.pools);
     defaultPool = if cfg.storage.defaultPool == null then "" else cfg.storage.defaultPool;
     rootSize = if cfg.storage.rootSize == null then "" else cfg.storage.rootSize;
+    networks = map (n: {
+      inherit (n) name;
+      uplink = if n.uplink == null then "" else n.uplink;
+      vlan = if n.vlan == null then 0 else n.vlan;
+    }) (lib.attrValues cfg.networking.guest.networks);
+    defaultNetwork =
+      if cfg.networking.guest.defaultNetwork == null then "" else cfg.networking.guest.defaultNetwork;
+    managementInterface =
+      if cfg.networking.management.interface == null then "" else cfg.networking.management.interface;
   };
   setupConfig = pkgs.writeText "strata-incus-setup.json" (
     builtins.toJSON cfg.compute.incus.setupState

@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -24,20 +23,9 @@ type storagePool struct {
 }
 
 // usedByProject reports whether instances or profiles of project use the
-// pool. Those are what Incus checks before it lets a project lose access
-// to a pool; cached images and volumes do not block it.
+// pool.
 func (p storagePool) usedByProject(project string) bool {
-	for _, u := range p.UsedBy {
-		if !strings.HasPrefix(u, "/1.0/instances/") && !strings.HasPrefix(u, "/1.0/profiles/") {
-			continue
-		}
-		if _, query, ok := strings.Cut(u, "?"); ok {
-			if q, err := url.ParseQuery(query); err == nil && q.Get("project") == project {
-				return true
-			}
-		}
-	}
-	return false
+	return usedByProject(p.UsedBy, project)
 }
 
 // source returns the source the pool was created with. Incus rewrites

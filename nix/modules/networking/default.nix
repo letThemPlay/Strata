@@ -40,6 +40,8 @@ let
     ++ lib.optional cfg.monitoring.enable cfg.monitoring.nodeExporter.port;
 in
 {
+  imports = [ ./guest.nix ];
+
   options.strata.networking = {
     enable = mkEnableOption "Strata management networking and host firewall";
 

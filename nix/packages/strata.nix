@@ -19,6 +19,7 @@ buildGoModule {
     "cmd/strata-api"
     "cmd/strata-agent"
     "cmd/strata-controller"
+    "cmd/strata-host"
     "cmd/strata-install"
   ];
 

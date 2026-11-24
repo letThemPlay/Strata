@@ -30,5 +30,16 @@
       # gateway4 = "192.0.2.1";
       # dns = [ "192.0.2.53" ];
     };
+
+    # Workload storage pools on dedicated disks (never the system disk).
+    # Disks must be empty; Strata never erases them. See
+    # docs/administration/storage.md.
+    # storage = {
+    #   defaultPool = "fast";
+    #   pools.fast = {
+    #     driver = "zfs";
+    #     devices = [ "/dev/disk/by-id/nvme-..." ];
+    #   };
+    # };
   };
 }

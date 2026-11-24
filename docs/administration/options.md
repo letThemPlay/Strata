@@ -82,6 +82,12 @@ Every `strata.<module>.enable` below requires `strata.enable`.
 |---|---|---|---|
 | `strata.compute.enable` | bool | `false` | Run Incus (`incus-lts`), which manages QEMU/KVM VMs and LXC containers. Enables the nftables firewall, which Incus requires. libvirt is not installed. |
 | `strata.compute.incus.project` | string | `"strata"` | Incus project for Strata's workloads: lowercase letters, digits and hyphens, starting with a letter; not `"default"`. |
+| `strata.compute.incus.limits.cpu` | null or positive int | `null` | Most CPUs the project's instances may use in total. `null`: no limit. |
+| `strata.compute.incus.limits.memory` | null or size | `null` | Most memory in total, e.g. `"64GiB"`. |
+| `strata.compute.incus.limits.disk` | null or size | `null` | Most disk space across all pools, e.g. `"2TiB"`. |
+| `strata.compute.incus.limits.instances` | null or positive int | `null` | Most instances (VMs and containers). |
+
+Sizes are a number followed by `B`, `KiB`, `MiB`, `GiB`, `TiB` or `PiB`.
 
 What `strata.compute` sets up:
 
@@ -94,17 +100,17 @@ What `strata.compute` sets up:
   unprivileged; nesting, syscall interception, `raw.*` and other low-level
   settings, disks not backed by a storage pool, and GPU, PCI, USB,
   Infiniband, unix-char, unix-block, unix-hotplug and proxy devices are
-  refused. NICs must use Incus-managed networks. Snapshots and backups are
-  blocked until the storage slice.
+  refused. NICs must use Incus-managed networks. Snapshots are allowed;
+  backup export is blocked until the backup design (M7). The project may use
+  only the pools declared in `strata.storage`, within the limits above.
 - **The agent's identity** (with `strata.agent.enable`): a key and
   certificate generated on the host in `/var/lib/strata-incus/` (root only,
   never in Git), trusted by Incus as `strata-agent`, restricted to the
   project. The agent reads them as systemd credentials and reports in
   `/var/lib/strata/backend.json` whether Incus is reachable and trusts it.
   It never uses the Incus Unix socket (ADR-0017).
-- **No storage pools and no networks yet.** Instances cannot be created until
-  a storage pool exists; pools on dedicated disks and guest networks come in
-  later M2 slices.
+- **Storage pools** come from [`strata.storage`](#storage). Without a pool,
+  instances cannot be created. **No guest networks yet** (a later M2 slice).
 - Restarting `incus.service` does not stop instances.
 
 KVM modules are not configured: udev loads `kvm-intel` or `kvm-amd` from the
@@ -113,6 +119,31 @@ CPU's features.
 > **Upgrading a host installed before M2:** after `nix flake update` and
 > `nixos-rebuild switch`, libvirtd is gone and Incus starts. M1 hosts have no
 > workloads; `/var/lib/libvirt` is left behind and can be deleted.
+
+## Storage
+
+Workload storage pools on dedicated disks, created as Incus storage pools by
+`strata-incus-setup.service`. See the [storage guide](storage.md) for how to
+choose disks, adopt existing pools and what removing a pool does.
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.storage.pools.<name>.driver` | `"zfs"`, `"lvm"` or `"dir"` | — | Incus storage driver. `<name>`: lowercase letters, digits and hyphens, starting with a letter, at most 31 characters. |
+| `strata.storage.pools.<name>.devices` | list of `/dev/disk/by-id/` paths | `[]` | Whole disks: one for `lvm` (a thin pool), one or two for `zfs`. Must be empty unless adopted. |
+| `strata.storage.pools.<name>.zfs.layout` | `"single"` or `"mirror"` | `"single"` | ZFS layout; `mirror` needs two devices. For other layouts, create the zpool by hand and adopt it. |
+| `strata.storage.pools.<name>.path` | null or absolute path | `null` | For `dir`: a mount point declared in `fileSystems`, on its own disk (not `/`, `/boot`, `/nix`). The pool lives in `<path>/<name>`. |
+| `strata.storage.pools.<name>.adopt` | bool | `false` | Use an existing, empty zpool or volume group named `<name>` on the devices instead of creating one. |
+| `strata.storage.pools.<name>.limit` | null or size | `null` | Most disk space the project may use on this pool. |
+| `strata.storage.defaultPool` | null or pool name | `null` | Pool for the root disk of new instances. |
+| `strata.storage.rootSize` | null or size | `null` | Root disk size of new instances (default profile). Required when the default pool or the project has a disk limit. |
+| `strata.storage.lvm.autoActivation` | `"declared"` or `"all"` | `"declared"` with `strata.disk`, else `"all"` | Which LVM volume groups activate at boot. `"declared"`: only those of `lvm` pools, so leftover volume groups on other disks stay inactive. |
+
+Checked at evaluation: devices are `by-id` paths, used by one pool only, and
+never the system disk (`strata.disk.device`); device counts match the driver
+and layout; a `dir` path is a declared mount point; the default pool exists;
+pools require `strata.compute`. A `zfs` pool enables ZFS (and fails
+evaluation if the kernel's ZFS module is unavailable) and sets
+`networking.hostId` from the node ID unless it is set.
 
 ## Access
 
@@ -201,6 +232,7 @@ evaluation. systemd-boot keeps at most 10 generations
 - `checks.<system>.nixos-agent`: VM test of the agent.
 - `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, Incus, KVM).
 - `checks.<system>.nixos-incus`: VM test of Incus and the agent's restricted identity (allowed and refused operations, loopback-only API, configuration enforcement).
+- `checks.<system>.nixos-storage`: VM test of storage pools (ZFS mirror, LVM-thin, dir; refusals; adoption; removal; LVM autoactivation; reboot).
 - `checks.<system>.reference-host`: builds the reference host (the `host` template plus test values).
 - `checks.x86_64-linux.nixos-install-ext4`: formats an empty disk with the `ext4` layout, installs the reference host and boots it under UEFI.
 - `checks.x86_64-linux.nixos-installer`: installs a host with the installer ISO, offline, and boots it.

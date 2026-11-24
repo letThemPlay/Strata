@@ -182,7 +182,7 @@ func TestServerErrors(t *testing.T) {
 				w.WriteHeader(http.StatusForbidden)
 				_, _ = w.Write([]byte(`{"type":"error","error":"Certificate is restricted","error_code":403}`))
 			},
-			want: "HTTP 403: Certificate is restricted",
+			want: "GET /1.0: HTTP 403: Certificate is restricted",
 		},
 		"malformed JSON": {
 			handler: func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte("<html>")) },

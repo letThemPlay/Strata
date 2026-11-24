@@ -93,6 +93,42 @@ let
       };
     }
   ];
+  pool = driver: extra: { inherit driver; } // extra;
+  disk1 = "/dev/disk/by-id/ata-DISK1";
+  disk2 = "/dev/disk/by-id/ata-DISK2";
+  disk3 = "/dev/disk/by-id/ata-DISK3";
+  storageWith =
+    storage:
+    hostWith [
+      static
+      {
+        strata.storage = storage;
+        fileSystems."/srv/scratch" = {
+          device = "/dev/disk/by-id/ata-DIR";
+          fsType = "ext4";
+        };
+      }
+    ];
+  storage = storageWith {
+    defaultPool = "fast";
+    rootSize = "20GiB";
+    pools = {
+      fast = pool "zfs" {
+        devices = [
+          disk1
+          disk2
+        ];
+        zfs.layout = "mirror";
+        limit = "1TiB";
+      };
+      bulk = pool "lvm" { devices = [ disk3 ]; };
+      scratch = pool "dir" { path = "/srv/scratch"; };
+    };
+  };
+  sc = storage.config;
+  state = sc.strata.compute.incus.setupState;
+  storageFails = msg: st: hasFailure msg (storageWith st);
+  lvmConf = sys: sys.config.environment.etc."lvm/lvm.conf".text or "";
   templateModules = [
     ../../templates/host/hardware-configuration.nix
     ../../templates/host/configuration.nix
@@ -176,6 +212,165 @@ let
     "compute does not hardcode vendor KVM modules" =
       !(lib.elem "kvm-intel" hc.boot.kernelModules) && !(lib.elem "kvm-amd" hc.boot.kernelModules);
     "compute requires strata.enable" = requiresEnable "compute" { };
+
+    # ---- storage ----
+    "storage: valid pools have no failed assertions" = failedAssertions storage == [ ];
+    "storage: setup state lists the pools as declared" =
+      let
+        byName = lib.listToAttrs (map (p: lib.nameValuePair p.name p) state.pools);
+      in
+      lib.length state.pools == 3
+      && byName.fast.layout == "mirror"
+      &&
+        byName.fast.devices == [
+          disk1
+          disk2
+        ]
+      && byName.fast.limit == "1TiB"
+      && byName.bulk.limit == ""
+      && byName.scratch.path == "/srv/scratch"
+      && state.defaultPool == "fast";
+    "storage: snapshots allowed, backups blocked" =
+      state.projectConfig."restricted.snapshots" == "allow"
+      && state.projectConfig."restricted.backups" == "block";
+    "storage: project limits only when set" =
+      let
+        limited = hostWith [
+          static
+          {
+            strata.compute.incus.limits = {
+              cpu = 16;
+              memory = "64GiB";
+              instances = 20;
+            };
+          }
+        ];
+        pc = limited.config.strata.compute.incus.setupState.projectConfig;
+      in
+      pc."limits.cpu" == "16"
+      && pc."limits.memory" == "64GiB"
+      && pc."limits.instances" == "20"
+      && !(pc ? "limits.disk")
+      && !(state.projectConfig ? "limits.cpu");
+    "storage: ZFS only with a zfs pool, hostId from the node ID" =
+      sc.boot.supportedFilesystems.zfs or false
+      && sc.networking.hostId == builtins.substring 0 8 (builtins.hashString "sha256" "hv-01")
+      && !(hc.boot.supportedFilesystems.zfs or false);
+    "storage: LVM pools load the device-mapper thin and snapshot targets" =
+      lib.all (m: lib.elem m sc.boot.kernelModules) [
+        "dm_thin_pool"
+        "dm_snapshot"
+      ]
+      && !(lib.elem "dm_thin_pool" hc.boot.kernelModules);
+    "storage: dir pool mount is required by setup" =
+      lib.elem "/srv/scratch" sc.systemd.services.strata-incus-setup.unitConfig.RequiresMountsFor;
+    "storage: LVM autoactivation limited to declared pools on Strata disks" =
+      lib.hasInfix "auto_activation_volume_list = [ ]" (lvmConf diskHost)
+      && lib.hasInfix "auto_activation_volume_list = [ ]" (
+        diskHost.config.boot.initrd.systemd.contents."/etc/lvm/lvm.conf".text or ""
+      )
+      && !(lib.hasInfix "auto_activation_volume_list" (lvmConf host))
+      && lib.hasInfix ''auto_activation_volume_list = [ "bulk" ]'' (
+        lvmConf (hostWith [
+          static
+          {
+            strata.storage = {
+              pools.bulk = pool "lvm" { devices = [ disk3 ]; };
+              lvm.autoActivation = "declared";
+            };
+          }
+        ])
+      );
+    "storage: no pools means no storage effects" =
+      failedAssertions host == [ ] && hc.strata.compute.incus.setupState.pools == [ ];
+    "storage: a limited default pool needs rootSize" =
+      storageFails "strata.storage.rootSize must be set"
+        {
+          defaultPool = "a";
+          pools.a = pool "zfs" {
+            devices = [ disk1 ];
+            limit = "1TiB";
+          };
+        };
+    "storage: setup state carries rootSize" = state.rootSize == "20GiB";
+    "storage: mirror needs two devices" = storageFails "a zfs pool needs one device" {
+      pools.p = pool "zfs" {
+        devices = [ disk1 ];
+        zfs.layout = "mirror";
+      };
+    };
+    "storage: lvm needs exactly one device" = storageFails "an lvm pool needs exactly one device" {
+      pools.p = pool "lvm" {
+        devices = [
+          disk1
+          disk2
+        ];
+      };
+    };
+    "storage: dir needs a declared mount point" = storageFails "a dir pool needs `path`" {
+      pools.p = pool "dir" { path = "/srv/elsewhere"; };
+    };
+    "storage: dir may not be a system mount" = storageFails "a dir pool needs `path`" {
+      pools.p = pool "dir" { path = "/boot"; };
+    };
+    "storage: a device in two pools fails" = storageFails "devices used by more than one pool" {
+      pools.a = pool "zfs" { devices = [ disk1 ]; };
+      pools.b = pool "lvm" { devices = [ disk1 ]; };
+    };
+    "storage: unknown default pool fails" = storageFails "is not a declared pool" {
+      defaultPool = "nope";
+      pools.a = pool "zfs" { devices = [ disk1 ]; };
+    };
+    "storage: reserved pool name fails" = storageFails "is reserved" {
+      pools.strata-no-pools = pool "zfs" { devices = [ disk1 ]; };
+    };
+    "storage: the system disk cannot hold a pool" =
+      hasFailure "the system disk (strata.disk.device) cannot hold a storage pool"
+        (hostWith [
+          static
+          {
+            strata.disk = {
+              enable = true;
+              device = disk1;
+            };
+            strata.storage.pools.p = pool "zfs" { devices = [ disk1 ]; };
+          }
+        ]);
+    "storage: pools require compute" =
+      hasFailure "strata.storage pools require strata.compute.enable"
+        (eval [
+          {
+            strata = {
+              enable = true;
+              node.id = "hv-01";
+              storage.pools.p = pool "zfs" { devices = [ disk1 ]; };
+            };
+          }
+        ]);
+    "storage: devices must be by-id paths" =
+      rejects (storageWith { pools.p = pool "zfs" { devices = [ "/dev/sdb" ]; }; })
+        [
+          "strata"
+          "storage"
+          "pools"
+          "p"
+          "devices"
+        ];
+    "storage: limits must be sizes" =
+      rejects
+        (storageWith {
+          pools.p = pool "zfs" {
+            devices = [ disk1 ];
+            limit = "lots";
+          };
+        })
+        [
+          "strata"
+          "storage"
+          "pools"
+          "p"
+          "limit"
+        ];
 
     # ---- access ----
     "access hardens sshd" =

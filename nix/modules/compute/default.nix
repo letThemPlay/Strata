@@ -5,12 +5,14 @@
 #   interface.
 # - Strata works in one Incus project that is restricted (no privileged or
 #   nested containers, no host devices or paths, no low-level settings).
-#   strata-incus-setup enforces the project's configuration on every boot.
-# - With the agent enabled, strata-incus-setup also creates the agent's TLS
-#   identity and has Incus trust it for that project only (ADR-0017). The
-#   agent never gets the Incus Unix socket.
+#   strata-incus-setup (strata-host incus-setup, root) enforces the
+#   project's configuration, including its limits, on every boot.
+# - With the agent enabled, it also creates the agent's TLS identity and
+#   has Incus trust it for that project only (ADR-0017). The agent never
+#   gets the Incus Unix socket.
+# - It creates the storage pools declared in strata.storage (ADR-0018).
 #
-# Storage pools and networks are not configured yet (later M2 slices).
+# Guest networks are not configured yet (a later M2 slice).
 #
 # KVM kernel modules are not listed here: udev autoloads kvm-intel or
 # kvm-amd from the CPU's feature flags, so no vendor is hardcoded.
@@ -49,6 +51,10 @@ let
     "restricted.idmap.uid" = "";
     "restricted.idmap.gid" = "";
     "restricted.cluster.target" = "block";
+    # Snapshots stay inside the pool; backup export belongs to the backup
+    # design (M7).
+    "restricted.snapshots" = "allow";
+    "restricted.backups" = "block";
     # Networks stay in the default project, where a restricted identity can
     # only view them; profiles, images and volumes are per project.
     "features.networks" = "false";
@@ -58,79 +64,45 @@ let
     "features.storage.volumes" = "true";
     "features.storage.buckets" = "true";
   };
-  projectJSON = pkgs.writeText "strata-incus-project.json" (
-    builtins.toJSON {
-      description = "Strata workloads (managed by NixOS; changes are reverted)";
-      config = projectConfig;
-    }
-  );
-
-  # The agent's identity; read by the agent through systemd credentials.
-  identityDir = "/var/lib/strata-incus";
-  certName = "strata-agent";
-
-  setupScript = pkgs.writeShellApplication {
-    name = "strata-incus-setup";
-    runtimeInputs = [
-      config.virtualisation.incus.clientPackage
-      pkgs.jq
-      pkgs.openssl
-      pkgs.coreutils
-    ];
-    text = ''
-      project=${lib.escapeShellArg project}
-
-      # --- Project: create it, or replace its configuration exactly. ---
-      if incus query "/1.0/projects/$project" >/dev/null 2>&1; then
-        incus query -X PUT "/1.0/projects/$project" --data "$(cat ${projectJSON})" >/dev/null
-        echo "project $project: configuration enforced"
-      else
-        jq --arg name "$project" '. + {name: $name}' ${projectJSON} |
-          incus query -X POST /1.0/projects --data "$(cat)" >/dev/null
-        echo "project $project: created"
-      fi
-    ''
-    + lib.optionalString cfg.agent.enable ''
-
-      # --- Agent identity: a key that never leaves this host. ---
-      dir=${identityDir}
-      if [ ! -s "$dir/client.key" ] || [ ! -s "$dir/client.crt" ]; then
-        umask 077
-        openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:secp384r1 -nodes \
-          -keyout "$dir/client.key.tmp" -out "$dir/client.crt.tmp" -days 3650 \
-          -subj "/CN=${certName}@${cfg.node.id}" \
-          -addext "extendedKeyUsage=clientAuth" 2>/dev/null
-        mv "$dir/client.key.tmp" "$dir/client.key"
-        mv "$dir/client.crt.tmp" "$dir/client.crt"
-        echo "agent identity: created"
-      fi
-      fp=$(openssl x509 -in "$dir/client.crt" -noout -fingerprint -sha256 |
-        cut -d= -f2 | tr -d : | tr '[:upper:]' '[:lower:]')
-
-      # --- Trust: exactly one entry, restricted to the project. ---
-      # Entries with this name and another fingerprint are stale; an entry
-      # with this fingerprint but other permissions is replaced.
-      ok=false
-      while read -r entry; do
-        efp=$(jq -r .fingerprint <<<"$entry")
-        if [ "$efp" = "$fp" ] &&
-          jq -e --arg p "$project" '.restricted == true and .projects == [$p] and .type == "client"' <<<"$entry" >/dev/null; then
-          ok=true
-        else
-          incus config trust remove "$efp"
-          echo "trust: removed $efp"
-        fi
-      done < <(incus query '/1.0/certificates?recursion=1' |
-        jq -c --arg name ${certName} --arg fp "$fp" '.[] | select(.name == $name or .fingerprint == $fp)')
-      if [ "$ok" = false ]; then
-        incus config trust add-certificate "$dir/client.crt" \
-          --name ${certName} --restricted --projects "$project"
-        echo "trust: added $fp, restricted to $project"
-      else
-        echo "trust: $fp restricted to $project"
-      fi
-    '';
+  limits = cfg.compute.incus.limits;
+  limitConfig = lib.filterAttrs (_: v: v != null) {
+    "limits.cpu" = limits.cpu;
+    "limits.memory" = limits.memory;
+    "limits.disk" = limits.disk;
+    "limits.instances" = limits.instances;
   };
+
+  # Desired state for strata-host incus-setup (internal/hostsetup).
+  setupState = {
+    inherit project;
+    projectDescription = "Strata workloads (managed by NixOS; changes are reverted)";
+    projectConfig = lib.mapAttrs (_: toString) (projectConfig // limitConfig);
+    agent =
+      if cfg.agent.enable then
+        {
+          dir = "/var/lib/strata-incus";
+          name = "strata-agent";
+          commonName = "strata-agent@${cfg.node.id}";
+        }
+      else
+        null;
+    pools = map (p: {
+      inherit (p)
+        name
+        driver
+        devices
+        adopt
+        ;
+      layout = p.zfs.layout;
+      path = if p.path == null then "" else p.path;
+      limit = if p.limit == null then "" else p.limit;
+    }) (lib.attrValues cfg.storage.pools);
+    defaultPool = if cfg.storage.defaultPool == null then "" else cfg.storage.defaultPool;
+    rootSize = if cfg.storage.rootSize == null then "" else cfg.storage.rootSize;
+  };
+  setupConfig = pkgs.writeText "strata-incus-setup.json" (
+    builtins.toJSON cfg.compute.incus.setupState
+  );
 in
 {
   options.strata.compute = {
@@ -145,6 +117,41 @@ in
           its configuration is enforced on every boot. Must not be
           "default".
         '';
+      };
+      limits =
+        let
+          size = lib.types.nullOr (lib.types.strMatching "[0-9]+(B|KiB|MiB|GiB|TiB|PiB)");
+        in
+        {
+          cpu = lib.mkOption {
+            type = lib.types.nullOr lib.types.ints.positive;
+            default = null;
+            description = "Most CPUs the project's instances may use in total (null: no limit).";
+          };
+          memory = lib.mkOption {
+            type = size;
+            default = null;
+            example = "64GiB";
+            description = "Most memory the project's instances may use in total (null: no limit).";
+          };
+          disk = lib.mkOption {
+            type = size;
+            default = null;
+            example = "2TiB";
+            description = "Most disk space the project may use across all pools (null: no limit).";
+          };
+          instances = lib.mkOption {
+            type = lib.types.nullOr lib.types.ints.positive;
+            default = null;
+            description = "Most instances (VMs and containers) in the project (null: no limit).";
+          };
+        };
+      setupState = lib.mkOption {
+        type = lib.types.attrs;
+        internal = true;
+        readOnly = true;
+        default = setupState;
+        description = "Desired state passed to strata-host incus-setup (for tests).";
       };
       address = lib.mkOption {
         type = lib.types.str;
@@ -182,7 +189,7 @@ in
     };
 
     systemd.services.strata-incus-setup = {
-      description = "Strata Incus project and agent identity";
+      description = "Strata Incus project, agent identity and storage pools";
       wantedBy = [ "multi-user.target" ];
       requires = [ "incus.service" ];
       after = [
@@ -193,11 +200,19 @@ in
       serviceConfig = {
         Type = "oneshot";
         RemainAfterExit = true;
-        ExecStart = lib.getExe setupScript;
+        ExecStart = "${lib.getExe' cfg.package "strata-host"} incus-setup --config ${setupConfig}";
         StateDirectory = "strata-incus";
         StateDirectoryMode = "0700";
         UMask = "0077";
       };
+      # dir pools live on their own mounts.
+      unitConfig.RequiresMountsFor = lib.concatMap (p: lib.optional (p.path != null) p.path) (
+        lib.attrValues cfg.storage.pools
+      );
+      # Re-run when the declared state changes.
+      restartTriggers = [ setupConfig ];
+      # pvs (adopting LVM pools).
+      path = [ config.services.lvm.package ];
     };
   };
 }

@@ -65,7 +65,10 @@ adopt it (below).
 
 3. Apply: `sudo nixos-rebuild switch --flake /etc/nixos#$(hostname)`. A ZFS
    pool needs the ZFS kernel module, which is downloaded from the binary
-   cache the first time (the host needs network access).
+   cache the first time (the host needs network access). **The first ZFS
+   pool on a host also needs a reboot**: the running system cannot load the
+   newly added module, and `strata-incus-setup` fails with `Module zfs not
+   found` until the host has rebooted into the new configuration.
 
 4. Check:
 

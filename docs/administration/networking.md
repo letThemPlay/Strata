@@ -16,6 +16,12 @@ construction, not only by firewall rules.
 1. Find the NICs (`ip -br link`, `networkctl list`). The management
    interface (`strata.networking.management.interface`) cannot be an
    uplink.
+
+   **Names can change when hardware changes.** PCI-path names (`enp3s0`)
+   include the bus number: adding a drive renamed `enp3s0` to `enp4s0` on a
+   test machine (onboard `eno1` kept its name). Check `ip -br link` after
+   adding or moving hardware and before rebuilding; a missing uplink is
+   refused (`uplink X does not exist`).
 2. Decide per uplink:
    - **Untagged** (an access port, or the native VLAN of a trunk): exactly
      one network uses the NIC.

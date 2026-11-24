@@ -1,9 +1,9 @@
 # Strata Architecture
 
-**Status:** Milestone M1 complete; M2 implemented and passing in VMs (Incus
-host, the agent's restricted identity, storage pools, guest networks, VM
-management through the CLI); M2's validation on physical hardware is
-pending. Incus is the workload backend (ADR-0015). This document describes the target
+**Status:** Milestones M1 and M2 complete (M2: Incus host, the agent's
+restricted identity, storage pools, guest networks and VM management
+through the CLI, validated on physical hardware). M3 has not started. Incus
+is the workload backend (ADR-0015). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
 
@@ -145,7 +145,7 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | `strata.storage` pools on dedicated disks (ZFS, LVM-thin, dir), project limits, LVM autoactivation policy | **Implemented** (M2 slice 2, experimental; ADR-0018) |
 | `strata.networking.guest` networks (Incus bridges on uplinks, untagged or VLAN, or isolated; no host address) | **Implemented** (M2 slice 3, experimental; ADR-0019) |
 | VM schema `vm.strata.dev/v1alpha1`; `strata vm create/list/show/start/stop/restart/update/delete` through the agent's local API (operations, verification, audit; plans confirmed by ID; deletion keeps data volumes); image server allow-list | **Implemented** (M2 slices 4a–4b, experimental; ADR-0020, ADR-0021) |
-| M2 acceptance on physical hardware | **Pending** (see [hardware validation](docs/installation/hardware-validation.md#m2-vm-management)) |
+| M2 acceptance on physical hardware | **Passed** (GMKtec M6 Ultra, AMD; see [results](docs/installation/hardware-validation.md#m2-results)) |
 | NAT/routed guest networks; bonds | Planned (later) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
@@ -241,9 +241,31 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
      start/stop/restart` (ADR-0020, ADR-0021). **Done.**
    - 4b: `update` with a plan confirmed by its ID, `delete` with typed
      confirmation keeping data volumes, and the image server allow-list
-     (ADR-0021). **Done.** M2's acceptance on physical hardware (the M2
-     section of the [hardware validation](docs/installation/hardware-validation.md))
-     is pending.
+     (ADR-0021). **Done.**
+
+### M2 status
+
+**M2 is complete.** Everything passes in VMs (eight NixOS VM tests), and
+the M2 section of the [hardware validation](docs/installation/hardware-validation.md#m2-vm-management)
+passed on one physical machine (GMKtec M6 Ultra, AMD): a ZFS pool on an
+added disk, a guest network on the second NIC, a VM created from an
+allow-listed image server, reached over SSH, updated with a plan, started
+again after a host reboot and deleted with its data volume kept.
+
+Known limitations at the end of M2:
+
+- VM management is local to each host (`strata vm` through the agent's
+  socket); remote management, accounts and roles come with M5.
+- Changes to a running VM restart it; live hotplug is not used.
+- Data volumes are kept but cannot be managed through Strata (M4).
+- Operation records are kept in memory only (until M3/M5).
+- Guest networks are bridged or isolated; no NAT or routed networks, no
+  bonds, no VLAN or bonded management interface.
+- **NIC names are not stable across hardware changes** (seen on hardware);
+  naming interfaces by MAC address is proposed.
+- The VM spec passes only SSH keys to cloud-init (`cloudInit.packages` is
+  proposed).
+- The first ZFS pool on a host needs a reboot after the rebuild.
 
 ## Architecture decision records
 

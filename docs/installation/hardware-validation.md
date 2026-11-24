@@ -86,6 +86,47 @@ Remove the stick and reboot.
 | 4.3 | Reboot persistence | after `sudo reboot`: 2.1, 2.2 and 2.5 pass again |
 | 4.4 | Disk layout | `lsblk -f`: ESP (vfat) and root (ext4) only, partition labels `disk-system-ESP` and `disk-system-root` |
 
+## M2: VM management
+
+M2's acceptance criterion is: **manage VMs through the CLI.** VM tests
+cover it under nested virtualization; this procedure checks it on one
+physical machine (Intel or AMD) that passed the M1 checks, updated to the
+commit under test (`cd /etc/nixos && sudo nix flake update && sudo
+nixos-rebuild switch --flake .#$(hostname)`). It needs a spare disk for a
+storage pool and a NIC other than the management interface (or an isolated
+network if there is none).
+
+1. **Declare a pool and a guest network** in `/etc/nixos/host.nix`, then
+   rebuild:
+
+   ```nix
+   strata.storage = { defaultPool = "vms"; pools.vms = { driver = "zfs"; devices = [ "/dev/disk/by-id/..." ]; }; };
+   strata.networking.guest = { defaultNetwork = "lan"; networks.lan.uplink = "enp3s0"; };
+   ```
+
+   Expected: `systemctl --failed` lists nothing; `sudo incus storage list`
+   and `sudo incus network list` show them.
+2. **Import an image** (for example one built with nixpkgs'
+   `incus-virtual-machine-image.nix`, or downloaded on another machine):
+   `sudo incus image import META.tar.xz DISK.qcow2 --alias test --project strata`.
+3. **Create and start** as the admin: write a spec (see
+   [VMs](../administration/vms.md)) with a root disk, a 1 GiB data disk and
+   a NIC on `lan`; `strata vm create -f vm.json`, `strata vm start NAME`.
+   Expected: `strata vm list` shows it `Running`.
+4. **Reach it:** from another machine on the guest network, ping or SSH to
+   the guest (its address from your DHCP server or its console:
+   `sudo incus console NAME --project strata`).
+5. **Update:** raise CPU and memory in the spec; `strata vm update -f
+   vm.json` shows a plan with `restart`; confirm. Expected: the guest
+   reports the new CPU count and memory.
+6. **Reboot the host** with `autostart: true`. Expected: the VM runs again,
+   `systemctl --failed` lists nothing.
+7. **Stop and delete:** `strata vm stop NAME`, `strata vm delete NAME
+   --confirm NAME`. Expected: the VM is gone; the data volume is listed as
+   kept and shown by `sudo incus storage volume list vms --project strata`.
+
+Record the result in the M2 table below.
+
 ## Results
 
 Record one row per machine. Attach `hardware.json` and any failing output
@@ -138,3 +179,9 @@ hardware run of the fixes from the TS140 run.
 - Boot-time log entries were stamped three days early until time
   synchronisation corrected the clock (hardware clock behind); not a
   Strata fault.
+
+### M2 results
+
+| Date | Commit | Machine | Pool (driver, disk) | Guest network | Image | Result | Notes |
+|---|---|---|---|---|---|---|---|
+| | | | | | | | |

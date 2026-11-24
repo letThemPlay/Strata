@@ -63,6 +63,52 @@ func (f *fakeVMs) VMAction(_ context.Context, name, action string, force bool, t
 	return f.fail
 }
 
+func (f *fakeVMs) PlanVM(_ context.Context, vm workload.VM) (workload.Plan, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.vms[vm.Name]
+	if !ok {
+		return workload.Plan{}, fmt.Errorf("vm %s: %w", vm.Name, workload.ErrNotFound)
+	}
+	return workload.PlanVM(cur.Spec, vm, cur.Status == "Running")
+}
+
+func (f *fakeVMs) UpdateVM(ctx context.Context, vm workload.VM, planID string, _ int) (workload.Plan, error) {
+	plan, err := f.PlanVM(ctx, vm)
+	if err != nil {
+		return plan, err
+	}
+	if plan.ID != planID {
+		return workload.Plan{}, fmt.Errorf("vm %s: %w: plan again", vm.Name, workload.ErrConflict)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.vms[vm.Name]
+	st.Spec = vm
+	f.vms[vm.Name] = st
+	return plan, nil
+}
+
+func (f *fakeVMs) DeleteVM(_ context.Context, name string, stop bool, _ int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.vms[name]
+	if !ok {
+		return nil, fmt.Errorf("vm %s: %w", name, workload.ErrNotFound)
+	}
+	if st.Status == "Running" && !stop {
+		return nil, fmt.Errorf("vm %s: %w: it is Running", name, workload.ErrConflict)
+	}
+	delete(f.vms, name)
+	var kept []string
+	for _, d := range st.Spec.Disks {
+		if d.Name != workload.RootDisk {
+			kept = append(kept, d.Pool+"/"+st.Spec.VolumeName(d))
+		}
+	}
+	return kept, nil
+}
+
 func serve(t *testing.T) (string, *fakeVMs) {
 	t.Helper()
 	socket := filepath.Join(t.TempDir(), "agent.sock")
@@ -86,9 +132,14 @@ func serve(t *testing.T) (string, *fakeVMs) {
 
 func vm(t *testing.T, socket string, args ...string) (int, string, string) {
 	t.Helper()
+	return vmIn(t, socket, "", args...)
+}
+
+func vmIn(t *testing.T, socket, input string, args ...string) (int, string, string) {
+	t.Helper()
 	t.Setenv("STRATA_AGENT_SOCKET", socket)
 	var out, errOut bytes.Buffer
-	cmd := cli.Command{Name: "strata", Summary: "test", Subcommands: []cli.Subcommand{Subcommand()}}
+	cmd := cli.Command{Name: "strata", Summary: "test", Subcommands: []cli.Subcommand{Subcommand(strings.NewReader(input))}}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	code := cmd.Run(ctx, append([]string{"vm"}, args...), &out, &errOut)
@@ -138,7 +189,8 @@ func TestErrors(t *testing.T) {
 		"missing vm":           {[]string{"show", "nope"}, cli.ExitError, "vm nope: not found"},
 		"no name":              {[]string{"start"}, cli.ExitUsage, "expected one VM name"},
 		"unknown command":      {[]string{"migrate"}, cli.ExitUsage, `unknown command "migrate"`},
-		"delete not in 4a":     {[]string{"delete", "x"}, cli.ExitUsage, `unknown command "delete"`},
+		"delete unconfirmed":   {[]string{"delete", "x"}, cli.ExitUsage, "confirm with --confirm x"},
+		"delete wrong name":    {[]string{"delete", "x", "--confirm", "y"}, cli.ExitUsage, "confirm with --confirm x"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			code, _, errOut := vm(t, socket, tc.args...)
@@ -173,5 +225,49 @@ func TestConnectionErrors(t *testing.T) {
 	code, _, errOut = vm(t, socket, "list")
 	if code != cli.ExitError || !strings.Contains(errOut, "permission denied (members of the strata-operators group") {
 		t.Errorf("no permission: %d %q", code, errOut)
+	}
+}
+
+func TestUpdateAndDelete(t *testing.T) {
+	socket, f := serve(t)
+	dir := t.TempDir()
+	file := filepath.Join(dir, "web.json")
+	_ = os.WriteFile(file, []byte(spec), 0o600)
+	if code, _, errOut := vm(t, socket, "create", "-f", file); code != cli.ExitOK {
+		t.Fatal(errOut)
+	}
+	f.vms["web-01"] = workload.VMStatus{Spec: f.vms["web-01"].Spec, Status: "Running"}
+	bigger := filepath.Join(dir, "bigger.json")
+	_ = os.WriteFile(bigger, []byte(strings.Replace(spec, `"cpu":2`, `"cpu":4`, 1)), 0o600)
+
+	code, out, _ := vmIn(t, socket, "n\n", "update", "-f", bigger)
+	if code != cli.ExitError || !strings.Contains(out, "resources.cpu  2 -> 4  restart") ||
+		!strings.Contains(out, "stopped gracefully, changed and started again") || !strings.Contains(out, "Nothing was changed.") {
+		t.Errorf("declined: %d\n%s", code, out)
+	}
+	if f.vms["web-01"].Spec.Resources.CPU != 2 {
+		t.Error("declined plan was applied")
+	}
+	if code, out, errOut := vmIn(t, socket, "y\n", "update", "-f", bigger); code != cli.ExitOK || !strings.Contains(out, "update web-01: done") {
+		t.Errorf("accepted: %d %s %s", code, out, errOut)
+	}
+	if f.vms["web-01"].Spec.Resources.CPU != 4 {
+		t.Error("plan not applied")
+	}
+	if code, out, _ := vm(t, socket, "update", "-f", bigger, "--yes"); code != cli.ExitOK || !strings.Contains(out, "No changes for web-01.") {
+		t.Errorf("no changes: %d %s", code, out)
+	}
+
+	f.vms["web-01"] = workload.VMStatus{Spec: workload.VM{
+		APIVersion: workload.VMAPIVersion, Name: "web-01",
+		Resources: workload.Resources{CPU: 1, Memory: "1GiB"},
+		Disks:     []workload.Disk{{Name: "root", Size: "10GiB", Pool: "fast"}, {Name: "data", Size: "1GiB", Pool: "bulk"}},
+	}, Status: "Running"}
+	if code, _, errOut := vm(t, socket, "delete", "web-01", "--confirm", "web-01"); code != cli.ExitError || !strings.Contains(errOut, "it is Running") {
+		t.Errorf("running: %d %s", code, errOut)
+	}
+	code, out, errOut := vm(t, socket, "delete", "web-01", "--confirm", "web-01", "--stop")
+	if code != cli.ExitOK || !strings.Contains(out, "Data volumes kept (not deleted): bulk/web-01-data") {
+		t.Errorf("delete: %d %q %q", code, out, errOut)
 	}
 }

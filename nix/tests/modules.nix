@@ -529,8 +529,27 @@ let
       s.IPAddressDeny == "any" && s.IPAddressAllow == "localhost" && s.CapabilityBoundingSet == "";
     "api: no socket or group without compute" =
       !(valid.config.systemd.sockets ? strata-agent) && !(valid.config.users.groups ? strata-operators);
-    "api: no remote image servers" =
+    "api: no remote image servers by default" =
       state.projectConfig."restricted.images.servers" == "strata-no-image-servers.invalid";
+    "api: declared image servers are allowed" =
+      (hostWith [
+        static
+        {
+          strata.compute.incus.imageServers = [
+            "images.linuxcontainers.org"
+            "images.example.org"
+          ];
+        }
+      ]).config.strata.compute.incus.setupState.projectConfig."restricted.images.servers"
+      == "images.linuxcontainers.org,images.example.org";
+    "api: image servers are host names, not URLs" =
+      rejects (hostWith [ { strata.compute.incus.imageServers = [ "https://images.example.org" ]; } ])
+        [
+          "strata"
+          "compute"
+          "incus"
+          "imageServers"
+        ];
 
     # ---- access ----
     "access hardens sshd" =

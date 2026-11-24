@@ -172,36 +172,28 @@ func (c *Client) CreateVM(ctx context.Context, vm workload.VM) (err error) {
 		return err
 	}
 
-	var created []workload.Disk
-	defer func() {
-		if err == nil {
-			return
+	var data []workload.Disk
+	for _, d := range vm.Disks {
+		if d.Name != workload.RootDisk {
+			data = append(data, d)
 		}
-		for _, d := range created {
-			if derr := c.Do(context.WithoutCancel(ctx), http.MethodDelete, volumePath(d.Pool, vm.VolumeName(d)), nil, nil); derr != nil {
-				err = errors.Join(err, fmt.Errorf("clean up new volume %s: %w", vm.VolumeName(d), derr))
-			}
+	}
+	created, err := c.createVolumes(ctx, vm, data)
+	defer func() {
+		if err != nil {
+			err = errors.Join(err, c.removeNewVolumes(context.WithoutCancel(ctx), vm, created))
 		}
 	}()
-	for _, d := range vm.Disks {
-		if d.Name == workload.RootDisk {
-			continue
-		}
-		name := vm.VolumeName(d)
-		if err := c.Do(ctx, http.MethodGet, volumePath(d.Pool, name), nil, nil); err == nil {
-			return fmt.Errorf("vm %s: volume %s on pool %s %w; data volumes are never reused implicitly", vm.Name, name, d.Pool, workload.ErrExists)
-		} else if !IsNotFound(err) {
-			return fmt.Errorf("vm %s: volume %s: %w", vm.Name, name, err)
-		}
-		body := map[string]any{"name": name, "content_type": "block", "config": map[string]string{"size": d.Size}}
-		if err := c.Do(ctx, http.MethodPost, "/1.0/storage-pools/"+url.PathEscape(d.Pool)+"/volumes/custom", body, nil); err != nil {
-			return fmt.Errorf("vm %s: create volume %s: %w", vm.Name, name, err)
-		}
-		created = append(created, d)
+	if err != nil {
+		return err
 	}
 
 	source := map[string]string{"type": "none"}
-	if vm.Image != "" {
+	switch {
+	case vm.ImageServer != "":
+		// Incus enforces the project's allowed servers.
+		source = map[string]string{"type": "image", "alias": vm.Image, "server": "https://" + vm.ImageServer, "protocol": "simplestreams"}
+	case vm.Image != "":
 		source = map[string]string{"type": "image", "alias": vm.Image}
 	}
 	body := map[string]any{
@@ -290,4 +282,37 @@ func (c *Client) VMAction(ctx context.Context, name, action string, force bool, 
 		return fmt.Errorf("vm %s: %w: status %s after %s, want %s", name, workload.ErrVerify, inst.Status, action, want)
 	}
 	return nil
+}
+
+// createVolumes creates the data volumes for disks, refusing any that
+// already exist (data volumes are never reused implicitly). It returns the
+// disks whose volumes it created, also on error.
+func (c *Client) createVolumes(ctx context.Context, vm workload.VM, disks []workload.Disk) ([]workload.Disk, error) {
+	var created []workload.Disk
+	for _, d := range disks {
+		name := vm.VolumeName(d)
+		if err := c.Do(ctx, http.MethodGet, volumePath(d.Pool, name), nil, nil); err == nil {
+			return created, fmt.Errorf("vm %s: volume %s on pool %s %w; data volumes are never reused implicitly", vm.Name, name, d.Pool, workload.ErrExists)
+		} else if !IsNotFound(err) {
+			return created, fmt.Errorf("vm %s: volume %s: %w", vm.Name, name, err)
+		}
+		body := map[string]any{"name": name, "content_type": "block", "config": map[string]string{"size": d.Size}}
+		if err := c.Do(ctx, http.MethodPost, "/1.0/storage-pools/"+url.PathEscape(d.Pool)+"/volumes/custom", body, nil); err != nil {
+			return created, fmt.Errorf("vm %s: create volume %s: %w", vm.Name, name, err)
+		}
+		created = append(created, d)
+	}
+	return created, nil
+}
+
+// removeNewVolumes removes volumes this request created (new and empty)
+// after a failure.
+func (c *Client) removeNewVolumes(ctx context.Context, vm workload.VM, created []workload.Disk) error {
+	var errs []error
+	for _, d := range created {
+		if err := c.Do(ctx, http.MethodDelete, volumePath(d.Pool, vm.VolumeName(d)), nil, nil); err != nil {
+			errs = append(errs, fmt.Errorf("clean up new volume %s: %w", vm.VolumeName(d), err))
+		}
+	}
+	return errors.Join(errs...)
 }

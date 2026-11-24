@@ -51,9 +51,14 @@ let
     "restricted.idmap.uid" = "";
     "restricted.idmap.gid" = "";
     "restricted.cluster.target" = "block";
-    # No remote image server: Incus would download on the project's behalf.
-    # Only images imported into the project can be used (ADR-0021).
-    "restricted.images.servers" = "strata-no-image-servers.invalid";
+    # Incus downloads images on the project's behalf only from these
+    # servers; none by default (a name that is never a server, since an
+    # empty value would allow all) (ADR-0021).
+    "restricted.images.servers" =
+      if cfg.compute.incus.imageServers == [ ] then
+        "strata-no-image-servers.invalid"
+      else
+        lib.concatStringsSep "," cfg.compute.incus.imageServers;
     # Snapshots stay inside the pool; backup export belongs to the backup
     # design (M7).
     "restricted.snapshots" = "allow";
@@ -158,6 +163,19 @@ in
             description = "Most instances (VMs and containers) in the project (null: no limit).";
           };
         };
+      imageServers = lib.mkOption {
+        type = lib.types.listOf (
+          lib.types.strMatching "([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}"
+        );
+        default = [ ];
+        example = [ "images.linuxcontainers.org" ];
+        description = ''
+          Host names of simplestreams image servers (https://NAME) that VMs
+          may be created from (`imageServer` in a VM spec). Empty: only
+          images imported into the project can be used, and the host never
+          downloads images by itself.
+        '';
+      };
       setupState = lib.mkOption {
         type = lib.types.attrs;
         internal = true;

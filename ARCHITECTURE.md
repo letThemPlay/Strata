@@ -1,8 +1,9 @@
 # Strata Architecture
 
-**Status:** Milestone M1 complete; M2 in progress (slices 1–4a: Incus host,
-the agent's restricted identity, storage pools, guest networks, VM lifecycle
-through the CLI). Incus is the workload backend (ADR-0015). This document describes the target
+**Status:** Milestone M1 complete; M2 implemented and passing in VMs (Incus
+host, the agent's restricted identity, storage pools, guest networks, VM
+management through the CLI); M2's validation on physical hardware is
+pending. Incus is the workload backend (ADR-0015). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
 
@@ -143,8 +144,8 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | Physical hardware validation | **Passed** (M1 slice 5): Intel (Lenovo ThinkServer TS140) and AMD (GMKtec M6 Ultra). See [results](docs/installation/hardware-validation.md#results) |
 | `strata.storage` pools on dedicated disks (ZFS, LVM-thin, dir), project limits, LVM autoactivation policy | **Implemented** (M2 slice 2, experimental; ADR-0018) |
 | `strata.networking.guest` networks (Incus bridges on uplinks, untagged or VLAN, or isolated; no host address) | **Implemented** (M2 slice 3, experimental; ADR-0019) |
-| VM schema `vm.strata.dev/v1alpha1`; `strata vm create/list/show/start/stop/restart` through the agent's local API (operations, verification, audit) | **Implemented** (M2 slice 4a, experimental; ADR-0020, ADR-0021) |
-| `strata vm update` (plan) and `delete` (typed confirmation); image server allow-list; M2 hardware validation | Planned (M2 slice 4b) |
+| VM schema `vm.strata.dev/v1alpha1`; `strata vm create/list/show/start/stop/restart/update/delete` through the agent's local API (operations, verification, audit; plans confirmed by ID; deletion keeps data volumes); image server allow-list | **Implemented** (M2 slices 4a–4b, experimental; ADR-0020, ADR-0021) |
+| M2 acceptance on physical hardware | **Pending** (see [hardware validation](docs/installation/hardware-validation.md#m2-vm-management)) |
 | NAT/routed guest networks; bonds | Planned (later) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
@@ -238,9 +239,11 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
    - 4a: the VM schema, the Incus VM provider, the agent's local API with
      operations, verification and audit, and `strata vm create/list/show/
      start/stop/restart` (ADR-0020, ADR-0021). **Done.**
-   - 4b: `update` with a plan of disruptive and destructive changes,
-     `delete` with typed confirmation, the image server allow-list, and
-     the M2 hardware validation. Planned.
+   - 4b: `update` with a plan confirmed by its ID, `delete` with typed
+     confirmation keeping data volumes, and the image server allow-list
+     (ADR-0021). **Done.** M2's acceptance on physical hardware (the M2
+     section of the [hardware validation](docs/installation/hardware-validation.md))
+     is pending.
 
 ## Architecture decision records
 
@@ -876,10 +879,11 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
 
 ### ADR-0021: VM schema and lifecycle
 
-- **Status:** Accepted (M2 slice 4a; `update` and `delete` follow in 4b).
+- **Status:** Accepted (M2 slices 4a and 4b).
 - **Decision:**
   - **Schema `vm.strata.dev/v1alpha1`** (JSON; ADR-0004): name, CPU,
-    memory, a local image alias or none, disks (the first is `root`; others
+    memory, an image alias (local, or on an allowed `imageServer`) or none,
+    disks (the first is `root`; others
     are data volumes `<vm>-<disk>`), NICs on guest networks, autostart and
     cloud-init SSH keys. Unknown fields are rejected; everything is
     validated before an operation starts. No backend keys appear in it.
@@ -891,13 +895,35 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
     checked. Only then is the operation `SUCCEEDED`.
   - **Data volumes** are created before the instance. On failure, the
     volumes this request created are removed; an existing volume is never
-    reused or removed. Deleting VMs and their disks follows in 4b with
-    typed confirmation; data volumes are never deleted with a VM.
-  - **Images:** local images in the project only; remote image references
-    are refused by validation and by `restricted.images.servers`.
+    reused or removed.
+  - **Images:** local images in the project; downloads only from servers
+    listed in `strata.compute.incus.imageServers` (default none), enforced
+    by Incus through `restricted.images.servers` (simplestreams over
+    HTTPS).
+  - **Changes (`update`) are planned and confirmed by plan ID.** The agent
+    compares the desired spec with the VM's spec, which must match what
+    Incus has (a VM changed with `incus` directly is refused). The plan ID
+    is a hash of the current spec, the desired spec and whether the VM
+    runs; applying requires it, so what is applied is what was confirmed,
+    and a VM that changed in between is refused (`plan again`).
+  - **Changes to a running VM restart it** (graceful stop, change, start,
+    verify), except `autostart`. Live changes (hotplug) are not used: they
+    depend on the guest and are less predictable. If a change fails after
+    the stop, new volumes are removed and the VM is started again unchanged.
+  - **Allowed:** CPU, memory, growing disks, adding data disks (new
+    volumes only), detaching data disks (the volume is kept), NICs,
+    autostart, cloud-init keys (first boot only). **Refused:** shrinking a
+    disk, moving it to another pool, another image, renaming.
+  - **Delete** needs the VM's name as confirmation (checked by the agent)
+    and `--stop` for a running VM. The VM and its root disk are deleted;
+    **data volumes are never deleted with it**: the agent checks they still
+    exist and returns them. Deleting volumes belongs to M4 volume
+    management.
 - **Verified by:** `internal/workload`, `internal/incus`,
   `internal/agent/api` and `internal/vmcli` unit tests, `module-eval`, and
   the `nixos-vms` VM test (a NixOS guest created from a spec, booted,
   reaching its network and its data disk; stop, restart, forced stop; an
-  empty VM; refusals; image downloads refused; audit; autostart after a
-  host reboot).
+  empty VM; refusals; image servers; an update declined, then applied with
+  a restart and seen by the guest (CPU, memory, a new disk); refused
+  changes; a stale plan; detaching keeping the volume; audit; autostart
+  after a host reboot; delete with confirmation keeping data volumes).

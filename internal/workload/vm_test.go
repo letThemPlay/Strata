@@ -48,7 +48,7 @@ func TestParseVMRejects(t *testing.T) {
 		"cpu":              {[2]string{`"cpu": 2`, `"cpu": 0`}, "resources.cpu: must be 1-256"},
 		"memory unit":      {[2]string{`"4GiB"`, `"4G"`}, "resources.memory:"},
 		"memory too small": {[2]string{`"4GiB"`, `"64MiB"`}, "at least 128MiB"},
-		"remote image":     {[2]string{`"debian-13"`, `"images:debian/13"`}, "remote images (server:alias) are not allowed"},
+		"remote image":     {[2]string{`"debian-13"`, `"images:debian/13"`}, "server:alias is not accepted"},
 		"root not first":   {[2]string{`"name": "root"`, `"name": "boot"`}, `the first disk must be named "root"`},
 		"small root":       {[2]string{`"size": "20GiB"`, `"size": "512MiB"`}, "the root disk needs at least 1GiB"},
 		"duplicate disk":   {[2]string{`"name": "data"`, `"name": "root"`}, `"root" is used twice`},

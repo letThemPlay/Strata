@@ -73,6 +73,52 @@ func (f *fakeVMs) VMAction(_ context.Context, name, action string, force bool, t
 	return f.fail
 }
 
+func (f *fakeVMs) PlanVM(_ context.Context, vm workload.VM) (workload.Plan, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	cur, ok := f.vms[vm.Name]
+	if !ok {
+		return workload.Plan{}, fmt.Errorf("vm %s: %w", vm.Name, workload.ErrNotFound)
+	}
+	return workload.PlanVM(cur.Spec, vm, cur.Status == "Running")
+}
+
+func (f *fakeVMs) UpdateVM(ctx context.Context, vm workload.VM, planID string, _ int) (workload.Plan, error) {
+	plan, err := f.PlanVM(ctx, vm)
+	if err != nil {
+		return plan, err
+	}
+	if plan.ID != planID {
+		return workload.Plan{}, fmt.Errorf("vm %s: %w: plan again", vm.Name, workload.ErrConflict)
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st := f.vms[vm.Name]
+	st.Spec = vm
+	f.vms[vm.Name] = st
+	return plan, nil
+}
+
+func (f *fakeVMs) DeleteVM(_ context.Context, name string, stop bool, _ int) ([]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.vms[name]
+	if !ok {
+		return nil, fmt.Errorf("vm %s: %w", name, workload.ErrNotFound)
+	}
+	if st.Status == "Running" && !stop {
+		return nil, fmt.Errorf("vm %s: %w: it is Running", name, workload.ErrConflict)
+	}
+	delete(f.vms, name)
+	var kept []string
+	for _, d := range st.Spec.Disks {
+		if d.Name != workload.RootDisk {
+			kept = append(kept, d.Pool+"/"+st.Spec.VolumeName(d))
+		}
+	}
+	return kept, nil
+}
+
 type lockedBuffer struct {
 	mu sync.Mutex
 	b  bytes.Buffer
@@ -210,14 +256,14 @@ func TestErrors(t *testing.T) {
 		code               int
 		want               string
 	}{
-		"invalid spec":    {http.MethodPost, "/api/v1/vms", `{"name":"x"}`, 400, "apiVersion"},
-		"unknown field":   {http.MethodPost, "/api/v1/vms", strings.Replace(spec, `"name"`, `"raw":1,"name"`, 1), 400, "unknown field"},
-		"too large":       {http.MethodPost, "/api/v1/vms", `{"name":"` + strings.Repeat("x", 70<<10) + `"}`, 400, "too large"},
-		"missing vm":      {http.MethodGet, "/api/v1/vms/nope", "", 404, "not_found"},
-		"unknown action":  {http.MethodPost, "/api/v1/vms/web-01/explode", "", 404, "unknown action"},
-		"bad timeout":     {http.MethodPost, "/api/v1/vms/web-01/stop?timeout=-1", "", 400, "timeout must be"},
-		"missing op":      {http.MethodGet, "/api/v1/operations/nope", "", 404, "no such operation"},
-		"delete (absent)": {http.MethodDelete, "/api/v1/vms/web-01", "", 405, ""},
+		"invalid spec":       {http.MethodPost, "/api/v1/vms", `{"name":"x"}`, 400, "apiVersion"},
+		"unknown field":      {http.MethodPost, "/api/v1/vms", strings.Replace(spec, `"name"`, `"raw":1,"name"`, 1), 400, "unknown field"},
+		"too large":          {http.MethodPost, "/api/v1/vms", `{"name":"` + strings.Repeat("x", 70<<10) + `"}`, 400, "too large"},
+		"missing vm":         {http.MethodGet, "/api/v1/vms/nope", "", 404, "not_found"},
+		"unknown action":     {http.MethodPost, "/api/v1/vms/web-01/explode", "", 404, "unknown action"},
+		"bad timeout":        {http.MethodPost, "/api/v1/vms/web-01/stop?timeout=-1", "", 400, "timeout must be"},
+		"missing op":         {http.MethodGet, "/api/v1/operations/nope", "", 404, "no such operation"},
+		"delete unconfirmed": {http.MethodDelete, "/api/v1/vms/web-01", "", 400, "confirm with its name"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			code, body := h.do(t, tc.method, tc.path, tc.body)
@@ -296,4 +342,81 @@ func TestGroupAuthorizer(t *testing.T) {
 // myUID is the test process's uid.
 func myUID() uint32 {
 	return uint32(os.Getuid()) //nolint:gosec // uids fit in uint32
+}
+
+func create(t *testing.T, h *harness, body string) {
+	t.Helper()
+	code, out := h.do(t, http.MethodPost, "/api/v1/vms", body)
+	if code != http.StatusAccepted {
+		t.Fatalf("create: %d %s", code, out)
+	}
+	var op Operation
+	_ = json.Unmarshal(out, &op)
+	if done := h.wait(t, op.ID); done.Status != StatusSucceeded {
+		t.Fatalf("create: %+v", done)
+	}
+}
+
+func TestUpdatePlanAndApply(t *testing.T) {
+	h := start(t, allowAll, true)
+	create(t, h, spec)
+	bigger := strings.Replace(spec, `"cpu":1`, `"cpu":2`, 1)
+
+	code, out := h.do(t, http.MethodPut, "/api/v1/vms/web-01?plan=true", bigger)
+	var plan workload.Plan
+	if code != http.StatusOK || json.Unmarshal(out, &plan) != nil || len(plan.Changes) != 1 || plan.Changes[0].Field != "resources.cpu" {
+		t.Fatalf("plan: %d %s", code, out)
+	}
+	if code, out := h.do(t, http.MethodPut, "/api/v1/vms/web-01", bigger); code != 400 || !strings.Contains(string(out), "?plan=true") {
+		t.Errorf("no mode: %d %s", code, out)
+	}
+	if code, out := h.do(t, http.MethodPut, "/api/v1/vms/other?plan=true", bigger); code != 400 || !strings.Contains(string(out), `not \"other\"`) {
+		t.Errorf("name mismatch: %d %s", code, out)
+	}
+
+	// A stale plan ID fails the operation with a conflict.
+	_, out = h.do(t, http.MethodPut, "/api/v1/vms/web-01?confirm=0000", bigger)
+	var op Operation
+	_ = json.Unmarshal(out, &op)
+	if done := h.wait(t, op.ID); done.Status != StatusFailed || !strings.Contains(done.Error, "plan again") {
+		t.Errorf("stale: %+v", done)
+	}
+
+	_, out = h.do(t, http.MethodPut, "/api/v1/vms/web-01?confirm="+plan.ID, bigger)
+	_ = json.Unmarshal(out, &op)
+	done := h.wait(t, op.ID)
+	if done.Status != StatusSucceeded || done.Type != "update" || done.Result == nil {
+		t.Errorf("apply: %+v", done)
+	}
+	if h.fake.vms["web-01"].Spec.Resources.CPU != 2 {
+		t.Error("not applied")
+	}
+
+	// A refused change is a 422 at planning time.
+	shrunk := strings.Replace(spec, `"8GiB"`, `"4GiB"`, 1)
+	if code, out := h.do(t, http.MethodPut, "/api/v1/vms/web-01?plan=true", shrunk); code != 422 || !strings.Contains(string(out), "cannot shrink") {
+		t.Errorf("refused: %d %s", code, out)
+	}
+}
+
+func TestDelete(t *testing.T) {
+	h := start(t, allowAll, true)
+	create(t, h, strings.Replace(spec, `]}`, `,{"name":"data","size":"1GiB","pool":"bulk"}]}`, 1))
+	h.fake.vms["web-01"] = workload.VMStatus{Spec: h.fake.vms["web-01"].Spec, Status: "Running"}
+
+	if code, out := h.do(t, http.MethodDelete, "/api/v1/vms/web-01?confirm=web-02", ""); code != 400 || !strings.Contains(string(out), "confirm=web-01") {
+		t.Errorf("wrong name: %d %s", code, out)
+	}
+	_, out := h.do(t, http.MethodDelete, "/api/v1/vms/web-01?confirm=web-01", "")
+	var op Operation
+	_ = json.Unmarshal(out, &op)
+	if done := h.wait(t, op.ID); done.Status != StatusFailed || !strings.Contains(done.Error, "conflict") {
+		t.Errorf("running: %+v", done)
+	}
+	_, out = h.do(t, http.MethodDelete, "/api/v1/vms/web-01?confirm=web-01&stop=true", "")
+	_ = json.Unmarshal(out, &op)
+	done := h.wait(t, op.ID)
+	if done.Status != StatusSucceeded || !strings.Contains(fmt.Sprint(done.Result), "bulk/web-01-data") {
+		t.Errorf("delete: %+v", done)
+	}
 }

@@ -41,11 +41,15 @@ type VM struct {
 	Resources  Resources `json:"resources"`
 	// Image is a local image alias in the Strata project. Empty: an empty
 	// VM (to be installed later).
-	Image     string     `json:"image,omitempty"`
-	Disks     []Disk     `json:"disks"`
-	Networks  []NIC      `json:"networks,omitempty"`
-	Autostart bool       `json:"autostart,omitempty"`
-	CloudInit *CloudInit `json:"cloudInit,omitempty"`
+	Image string `json:"image,omitempty"`
+	// ImageServer is the host name of a simplestreams image server
+	// (https://SERVER) to download Image from. It must be allowed by the
+	// host (strata.compute.incus.imageServers). Empty: a local image.
+	ImageServer string     `json:"imageServer,omitempty"`
+	Disks       []Disk     `json:"disks"`
+	Networks    []NIC      `json:"networks,omitempty"`
+	Autostart   bool       `json:"autostart,omitempty"`
+	CloudInit   *CloudInit `json:"cloudInit,omitempty"`
 }
 
 // Resources are a VM's CPU and memory.
@@ -74,14 +78,16 @@ type CloudInit struct {
 }
 
 var (
-	vmNamePattern    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
-	diskNamePattern  = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
-	nicNamePattern   = regexp.MustCompile(`^[a-z][a-z0-9]{0,14}$`)
-	objectPattern    = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
-	imagePattern     = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
-	sizePattern      = regexp.MustCompile(`^([0-9]{1,15})(B|KiB|MiB|GiB|TiB)$`)
-	sshKeyPattern    = regexp.MustCompile(`^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+={0,3}( [^\n]*)?$`)
-	errUnknownFields = errors.New("unknown field")
+	vmNamePattern      = regexp.MustCompile(`^[a-z][a-z0-9-]{0,62}$`)
+	diskNamePattern    = regexp.MustCompile(`^[a-z][a-z0-9-]{0,30}$`)
+	nicNamePattern     = regexp.MustCompile(`^[a-z][a-z0-9]{0,14}$`)
+	objectPattern      = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]{0,62}$`)
+	imagePattern       = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$`)
+	hostPattern        = regexp.MustCompile(`^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$`)
+	remoteImagePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._/-]{0,127}$`)
+	sizePattern        = regexp.MustCompile(`^([0-9]{1,15})(B|KiB|MiB|GiB|TiB)$`)
+	sshKeyPattern      = regexp.MustCompile(`^(ssh-(ed25519|rsa|dss)|ecdsa-sha2-nistp(256|384|521)|sk-(ssh-ed25519|ecdsa-sha2-nistp256)@openssh\.com) [A-Za-z0-9+/]+={0,3}( [^\n]*)?$`)
+	errUnknownFields   = errors.New("unknown field")
 )
 
 // ParseVM decodes and validates a VM spec. Unknown fields are rejected.
@@ -130,8 +136,13 @@ func (vm VM) Validate() error {
 	} else if n < MinMemoryBytes {
 		add("resources.memory: at least 128MiB")
 	}
-	if vm.Image != "" && !imagePattern.MatchString(vm.Image) {
-		add("image: %q must be a local image alias (letters, digits, '.', '_', '-'); remote images (server:alias) are not allowed", vm.Image)
+	switch {
+	case vm.ImageServer == "" && vm.Image != "" && !imagePattern.MatchString(vm.Image):
+		add("image: %q must be a local image alias (letters, digits, '.', '_', '-'); for a remote image set imageServer (server:alias is not accepted)", vm.Image)
+	case vm.ImageServer != "" && !hostPattern.MatchString(vm.ImageServer):
+		add("imageServer: %q must be a host name, e.g. images.linuxcontainers.org", vm.ImageServer)
+	case vm.ImageServer != "" && !remoteImagePattern.MatchString(vm.Image):
+		add("image: %q must be an image alias on the server, e.g. debian/13/cloud", vm.Image)
 	}
 
 	if len(vm.Disks) == 0 || vm.Disks[0].Name != RootDisk {
@@ -250,3 +261,11 @@ const (
 	ActionStop    = "stop"
 	ActionRestart = "restart"
 )
+
+// ErrConflict reports that a request conflicts with the workload's
+// current state (a stale plan, a running VM that must be stopped first).
+var ErrConflict = errors.New("conflict")
+
+// ErrRefused reports that a requested change is not supported (it would
+// lose data or cannot be applied).
+var ErrRefused = errors.New("change refused")

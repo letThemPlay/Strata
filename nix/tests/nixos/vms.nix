@@ -1,6 +1,6 @@
-# NixOS VM test: VM lifecycle through the strata CLI (M2 slice 4a,
-# ADR-0020, ADR-0021). Needs nested virtualization: hv01 runs a NixOS guest
-# under Incus.
+# NixOS VM test: VM lifecycle through the strata CLI (M2 slice 4,
+# ADR-0020, ADR-0021): create, start/stop/restart, update with a plan,
+# delete. Needs nested virtualization: hv01 runs a NixOS guest under Incus.
 #
 #   hv01 eth1 (management, VLAN 1); eth2 uplink of guest network "lan" (VLAN 2)
 #   peer eth1 (192.168.2.2, VLAN 2; nodes are numbered hv01=1, peer=2)
@@ -64,7 +64,10 @@ pkgs.testers.runNixOSTest {
       { lib, pkgs, ... }:
       {
         imports = [ self.nixosModules.default ];
-        environment.systemPackages = [ pkgs.jq ];
+        environment.systemPackages = [
+          pkgs.jq
+          pkgs.curl
+        ];
         users.users.mallory.isNormalUser = true;
 
         virtualisation = {
@@ -96,7 +99,12 @@ pkgs.testers.runNixOSTest {
           enable = true;
           node.id = "hv01";
           agent.enable = true;
-          compute.enable = true;
+          compute = {
+            enable = true;
+            # Allowed, but unreachable in the test (no network): the
+            # restriction is checked before the download.
+            incus.imageServers = [ "images.example.invalid" ];
+          };
           access = {
             enable = true;
             admin.authorizedKeys = [ keys.snakeOilEd25519PublicKey ];
@@ -228,11 +236,24 @@ pkgs.testers.runNixOSTest {
         hv01.fail("incus storage volume show vmpool other-data --project strata")
         hv01.succeed("jq '.name = \"remote\" | .image = \"images:debian/13\"' /tmp/web.json > /tmp/remote.json && chmod 644 /tmp/remote.json")
         out = hv01.fail(admin("create -f /tmp/remote.json") + " 2>&1")
-        assert "remote images (server:alias) are not allowed" in out, out
+        assert "server:alias is not accepted" in out, out
 
-    with subtest("the project cannot download images from any server"):
+    with subtest("images download only from declared servers"):
         cfg = json.loads(hv01.succeed("incus query /1.0/projects/strata"))["config"]
-        assert cfg["restricted.images.servers"] == "strata-no-image-servers.invalid", cfg
+        assert cfg["restricted.images.servers"] == "images.example.invalid", cfg
+        hv01.succeed(
+            "jq '.name = \"r1\" | .imageServer = \"images.other.invalid\" | .image = \"debian/13\" | .disks = [.disks[0]]'"
+            " /tmp/web.json > /tmp/r1.json",
+            "jq '.name = \"r2\" | .imageServer = \"images.example.invalid\" | .image = \"debian/13\" | .disks = [.disks[0]]'"
+            " /tmp/web.json > /tmp/r2.json",
+            "chmod 644 /tmp/r1.json /tmp/r2.json",
+        )
+        out = hv01.fail(admin("create -f /tmp/r1.json") + " 2>&1")
+        assert 'Image server "images.other.invalid" isn\'t allowed in this project' in out, out
+        # The declared server passes the restriction; the download itself
+        # fails (no network in the test).
+        out = hv01.fail(admin("create -f /tmp/r2.json") + " 2>&1")
+        assert "isn't allowed" not in out and "images.example.invalid" in out, out
         hv01.succeed(
             "mkdir -p /tmp/agent/servercerts",
             "cp /var/lib/strata-incus/client.crt /var/lib/strata-incus/client.key /tmp/agent/",
@@ -244,6 +265,67 @@ pkgs.testers.runNixOSTest {
             "type": "image", "server": "https://images.linuxcontainers.org", "protocol": "simplestreams", "alias": "debian/13"}})
         out = hv01.fail(f"INCUS_CONF=/tmp/agent incus query -X POST '/1.0/instances?project=strata' --data '{body}' 2>&1")
         assert "isn't allowed in this project" in out, out
+
+    hv01.succeed(
+        "jq '.resources = {\"cpu\": 2, \"memory\": \"2GiB\"} | .disks += [{\"name\": \"logs\", \"size\": \"1GiB\", \"pool\": \"vmpool\"}]'"
+        " /tmp/web.json > /tmp/web2.json",
+        "jq '.disks = [.disks[0], .disks[2]]' /tmp/web2.json > /tmp/web3.json",
+        "jq '.disks[0].size = \"4GiB\"' /tmp/web2.json > /tmp/shrink.json",
+        "jq '.image = \"other\"' /tmp/web2.json > /tmp/reimage.json",
+        "chmod 644 /tmp/web2.json /tmp/web3.json /tmp/shrink.json /tmp/reimage.json",
+    )
+
+    with subtest("update: the plan is shown; declining changes nothing"):
+        out = hv01.fail(admin("update -f /tmp/web2.json < /dev/null") + " 2>&1")
+        for expected in ["Plan for web-01 (running)", "resources.cpu", "1 -> 2", "restart",
+                         "new data volume web-01-logs", "stopped gracefully, changed and started again",
+                         "Nothing was changed."]:
+            assert expected in out, f"missing {expected!r} in:\n{out}"
+        assert inst("web-01")["config"]["limits.cpu"] == "1"
+
+    with subtest("update: a confirmed plan restarts the guest with the new resources"):
+        settle()  # the restart begins with a graceful stop
+        out = hv01.succeed("echo y | " + admin("update -f /tmp/web2.json"))
+        assert "update web-01: done" in out, out
+        i = inst("web-01")
+        assert i["status"] == "Running" and i["config"]["limits.cpu"] == "2" and i["config"]["limits.memory"] == "2GiB", i["config"]
+        hv01.succeed("incus storage volume show vmpool web-01-logs --project strata")
+        settle()
+        sw = "/run/current-system/sw/bin/"
+        assert hv01.succeed(guest(sw + "nproc")).strip() == "2"
+        mem_kib = int(hv01.succeed(guest(sw + "grep MemTotal /proc/meminfo")).split()[1])
+        assert mem_kib > 1800 * 1024, mem_kib
+        sizes = hv01.succeed(guest(sw + "lsblk -bdno SIZE")).split()
+        assert sizes.count("1073741824") == 2, sizes  # data and logs
+
+    with subtest("update: data-losing changes are refused"):
+        out = hv01.fail(admin("update -f /tmp/shrink.json --yes") + " 2>&1")
+        assert "disks cannot shrink" in out, out
+        out = hv01.fail(admin("update -f /tmp/reimage.json --yes") + " 2>&1")
+        assert "the image is only used when a VM is created" in out, out
+
+    with subtest("update: a stale plan is refused"):
+        plan = json.loads(hv01.succeed(
+            "su strata-admin -c \"curl -sf --unix-socket /run/strata/agent.sock -X PUT"
+            " 'http://agent/api/v1/vms/web-01?plan=true' --data @/tmp/web3.json\""))
+        assert plan["changes"] and plan["restart"], plan
+        hv01.succeed(admin("stop web-01 --force --timeout 0"))  # the VM changed since the plan
+        op = json.loads(hv01.succeed(
+            "su strata-admin -c \"curl -sf --unix-socket /run/strata/agent.sock -X PUT"
+            f" 'http://agent/api/v1/vms/web-01?confirm={plan['id']}' --data @/tmp/web3.json\""))
+        hv01.wait_until_succeeds(
+            "su strata-admin -c \"curl -sf --unix-socket /run/strata/agent.sock"
+            f" http://agent/api/v1/operations/{op['id']}\" | jq -e '.status == \"FAILED\" and (.error | contains(\"plan again\"))'",
+            timeout=30,
+        )
+        assert inst("web-01")["devices"].get("data"), "a stale plan must not be applied"
+
+    with subtest("update: removing a data disk detaches it and keeps the volume"):
+        out = hv01.succeed(admin("update -f /tmp/web3.json --yes"))  # stopped: no restart
+        assert "detached; volume web-01-data is kept" in out and "(stopped)" in out and "started again" not in out, out
+        assert "data" not in inst("web-01")["devices"]
+        hv01.succeed("incus storage volume show vmpool web-01-data --project strata")
+        hv01.succeed(admin("start web-01"))
 
     with subtest("every request is audited with the caller's uid"):
         uid = hv01.succeed("id -u strata-admin").strip()
@@ -263,5 +345,24 @@ pkgs.testers.runNixOSTest {
         assert inst("blank")["status"] == "Stopped"  # not autostart
         failed = hv01.succeed("systemctl list-units --failed --plain --no-legend").strip()
         assert failed == "", failed
+
+    with subtest("delete needs its name, and --stop for a running VM; data volumes are kept"):
+        out = hv01.fail(admin("delete web-01") + " 2>&1")
+        assert "confirm with --confirm web-01" in out, out
+        out = hv01.fail(admin("delete web-01 --confirm web-02") + " 2>&1")
+        assert "confirm with --confirm web-01" in out, out
+        out = hv01.fail(admin("delete web-01 --confirm web-01") + " 2>&1")
+        assert "it is Running" in out, out
+        settle()
+        out = hv01.succeed(admin("delete web-01 --confirm web-01 --stop"))
+        assert "delete web-01: done" in out and "Data volumes kept (not deleted): vmpool/web-01-logs" in out, out
+        hv01.fail("incus query '/1.0/instances/web-01?project=strata'")
+        assert "web-01" not in hv01.succeed(admin("list"))
+        volumes = hv01.succeed("incus storage volume list vmpool --project strata --format csv -c tn")
+        assert "custom,web-01-data" in volumes and "custom,web-01-logs" in volumes, volumes
+        assert "virtual-machine,web-01" not in volumes, volumes  # the root disk went with it
+        # A new VM may not silently take over the kept volumes.
+        out = hv01.fail(admin("create -f /tmp/web2.json") + " 2>&1")
+        assert "never reused implicitly" in out, out
   '';
 }

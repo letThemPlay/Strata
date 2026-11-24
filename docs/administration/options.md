@@ -86,6 +86,7 @@ Every `strata.<module>.enable` below requires `strata.enable`.
 | `strata.compute.incus.limits.memory` | null or size | `null` | Most memory in total, e.g. `"64GiB"`. |
 | `strata.compute.incus.limits.disk` | null or size | `null` | Most disk space across all pools, e.g. `"2TiB"`. |
 | `strata.compute.incus.limits.instances` | null or positive int | `null` | Most instances (VMs and containers). |
+| `strata.compute.incus.imageServers` | list of host names | `[]` | Simplestreams image servers (`https://NAME`) VMs may be created from (`imageServer` in a VM spec). Empty: only images imported into the project; the host never downloads images. |
 
 Sizes are a number followed by `B`, `KiB`, `MiB`, `GiB`, `TiB` or `PiB`.
 

@@ -58,6 +58,8 @@ type Config struct {
 	DefaultNetwork string    `json:"defaultNetwork"`
 	// ManagementInterface is never a guest uplink.
 	ManagementInterface string `json:"managementInterface"`
+	// Interfaces maps pinned interface names to their MAC addresses.
+	Interfaces map[string]string `json:"interfaces"`
 }
 
 // Identity describes the agent's TLS identity and its trust entry.
@@ -140,9 +142,13 @@ func (s *Setup) Run(ctx context.Context) error {
 			return err
 		}
 	}
+	pinErr := s.checkPins()
+	if pinErr != nil {
+		s.Log.ErrorContext(ctx, "pinned interface mismatch", "error", pinErr)
+	}
 	existing, poolErr := s.ensurePools(ctx)
 	networks, netErr := s.ensureNetworks(ctx)
-	refusals := errors.Join(poolErr, netErr)
+	refusals := errors.Join(pinErr, poolErr, netErr)
 	if networks == nil {
 		networks = map[string]incusNetwork{}
 	}

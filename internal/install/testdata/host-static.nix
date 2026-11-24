@@ -31,5 +31,9 @@
         "2001:db8::53"
       ];
     };
+
+    # The management interface keeps its name (and the host its
+    # management network) even if adding hardware changes the PCI layout.
+    networking.interfaces.eno1.macAddress = "52:54:00:12:34:56";
   };
 }

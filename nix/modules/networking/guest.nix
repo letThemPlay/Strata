@@ -14,6 +14,7 @@ let
   cfg = config.strata;
   g = cfg.networking.guest;
   mgmtIf = cfg.networking.management.interface;
+  pins = cfg.networking.interfaces;
   nets = lib.attrValues g.networks;
   ifName = lib.types.strMatching "[a-zA-Z0-9_-]{1,15}" // {
     description = "network interface name (1-15 characters, no dots)";
@@ -125,7 +126,9 @@ in
         map (
           u:
           lib.nameValuePair "20-strata-uplink-${u}" {
-            matchConfig.Name = u;
+            # By permanent MAC address if pinned (ADR-0011), else by name.
+            matchConfig =
+              if pins ? ${u} then { PermanentMACAddress = pins.${u}.macAddress; } else { Name = u; };
             networkConfig = noAddress // {
               ConfigureWithoutCarrier = true;
             };
@@ -149,6 +152,12 @@ in
           };
         };
       };
+
+    warnings = map (
+      u:
+      "strata.networking.guest: uplink ${u} is not pinned to its MAC address: adding or moving hardware may "
+      + "rename it. Add strata.networking.interfaces.${u}.macAddress (ethtool -P ${u})."
+    ) (lib.filter (u: !(pins ? ${u})) uplinks);
 
     # Bridged guest traffic passes nftables prerouting (br_netfilter); the
     # strict reverse-path check would drop it.

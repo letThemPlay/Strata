@@ -4,12 +4,15 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"regexp"
 	"slices"
 	"strings"
 
 	"github.com/letthemplay/Strata/internal/blockdev"
 	"github.com/letthemplay/Strata/internal/hardware"
 )
+
+var macPattern = regexp.MustCompile(`^([0-9a-f]{2}:){5}[0-9a-f]{2}$`)
 
 // MinDiskBytes is the smallest supported system disk.
 const MinDiskBytes = 16 << 30
@@ -56,6 +59,8 @@ func Probe(root fs.FS, a Answers) (DiskInfo, error) {
 	}) {
 		nicErr = fmt.Errorf("network.interface: no interface named %q (found: %s)",
 			a.Network.Interface, interfaceNames(report))
+	} else if _, err := InterfaceMAC(root, a.Network.Interface); err != nil {
+		nicErr = err
 	}
 	return disk, errors.Join(diskErr, nicErr)
 }
@@ -146,4 +151,26 @@ func FormatBytes(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
+}
+
+// InterfaceMAC returns the MAC address of interface name, for pinning its
+// name (strata.networking.interfaces). It refuses an address the kernel
+// did not get from the hardware (addr_assign_type other than 0, e.g. a
+// random or set MAC): a pin must match the NIC's permanent address.
+func InterfaceMAC(root fs.FS, name string) (string, error) {
+	dir := "sys/class/net/" + name
+	mac, err := fs.ReadFile(root, dir+"/address")
+	if err != nil {
+		return "", fmt.Errorf("network.interface: %s: no MAC address: %w", name, err)
+	}
+	m := strings.ToLower(strings.TrimSpace(string(mac)))
+	if !macPattern.MatchString(m) || m == "00:00:00:00:00:00" {
+		return "", fmt.Errorf("network.interface: %s: unusable MAC address %q", name, m)
+	}
+	// Absent on very old kernels: treat as permanent.
+	if t, err := fs.ReadFile(root, dir+"/addr_assign_type"); err == nil && strings.TrimSpace(string(t)) != "0" {
+		return "", fmt.Errorf("network.interface: %s: %s is not the NIC's permanent MAC address (addr_assign_type %s); "+
+			"its name cannot be pinned", name, m, strings.TrimSpace(string(t)))
+	}
+	return m, nil
 }

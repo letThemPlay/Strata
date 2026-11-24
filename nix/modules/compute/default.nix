@@ -116,6 +116,7 @@ let
       if cfg.networking.guest.defaultNetwork == null then "" else cfg.networking.guest.defaultNetwork;
     managementInterface =
       if cfg.networking.management.interface == null then "" else cfg.networking.management.interface;
+    interfaces = lib.mapAttrs (_: p: p.macAddress) cfg.networking.interfaces;
   };
   setupConfig = pkgs.writeText "strata-incus-setup.json" (
     builtins.toJSON cfg.compute.incus.setupState

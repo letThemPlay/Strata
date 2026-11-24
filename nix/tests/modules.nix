@@ -151,6 +151,19 @@ let
   };
   gc = guest.config;
   guestFails = msg: g: hasFailure msg (guestWith g);
+  pinned = hostWith [
+    static
+    {
+      strata.networking = {
+        interfaces = {
+          eno1.macAddress = "84:47:09:a3:5d:dc";
+          eno2.macAddress = "84:47:09:a3:5d:de";
+        };
+        guest.networks.lan.uplink = "eno2";
+      };
+    }
+  ];
+  pc = pinned.config;
   lvmConf = sys: sys.config.environment.etc."lvm/lvm.conf".text or "";
   templateModules = [
     ../../templates/host/hardware-configuration.nix
@@ -550,6 +563,48 @@ let
           "incus"
           "imageServers"
         ];
+
+    # ---- stable interface names ----
+    "nic: a pin becomes a .link file in the system and the initrd" =
+      let
+        l = pc.systemd.network.links."10-strata-eno1";
+      in
+      l.matchConfig.PermanentMACAddress == "84:47:09:a3:5d:dc"
+      && l.linkConfig.Name == "eno1"
+      && pc.boot.initrd.systemd.network.links ? "10-strata-eno2";
+    "nic: pinned management and uplinks are matched by MAC address" =
+      pc.systemd.network.networks."10-strata-management".matchConfig == {
+        PermanentMACAddress = "84:47:09:a3:5d:dc";
+      }
+      &&
+        pc.systemd.network.networks."20-strata-uplink-eno2".matchConfig == {
+          PermanentMACAddress = "84:47:09:a3:5d:de";
+        };
+    "nic: the firewall keeps the (stable) name" = pc.networking.firewall.interfaces ? eno1;
+    "nic: pinned interfaces give no warning" = !(lib.any (lib.hasInfix "not pinned") pc.warnings);
+    "nic: an unpinned management interface or uplink gives a warning" =
+      lib.any (lib.hasInfix "management.interface eno1 is not pinned") hc.warnings
+      && lib.any (lib.hasInfix "uplink eno2 is not pinned") gc.warnings
+      && hc.systemd.network.networks."10-strata-management".matchConfig == { Name = "eno1"; };
+    "nic: a MAC address pinned twice fails" = hasFailure "MAC addresses pinned twice" (hostWith [
+      static
+      {
+        strata.networking.interfaces = {
+          a.macAddress = "84:47:09:a3:5d:dc";
+          b.macAddress = "84:47:09:a3:5d:dc";
+        };
+      }
+    ]);
+    "nic: MAC addresses are lowercase colon-separated" =
+      rejects (hostWith [ { strata.networking.interfaces.eno1.macAddress = "84-47-09-A3-5D-DC"; } ])
+        [
+          "strata"
+          "networking"
+          "interfaces"
+          "eno1"
+          "macAddress"
+        ];
+    "nic: no pins, no link files" = !(hc.systemd.network.links ? "10-strata-eno1");
 
     # ---- access ----
     "access hardens sshd" =

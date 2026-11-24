@@ -99,8 +99,9 @@ network if there is none).
 **After adding hardware, check the interface and disk names first**
 (`ip -br link`, `ls -l /dev/disk/by-id/`): PCI-path NIC names (`enp3s0`)
 and kernel disk names (`nvme0n1`) can change when a device is added. Disks
-are always named by `by-id`; NIC names are not stable yet (see the M2
-notes below).
+are always named by `by-id`; pin NIC names to their MAC addresses
+([stable interface names](../administration/networking.md#stable-interface-names))
+before adding hardware.
 
 1. **Declare a pool and a guest network** in `/etc/nixos/host.nix`, then
    rebuild:
@@ -238,8 +239,9 @@ Follow-ups (not blocking M2):
 
 - **Stable NIC names:** a hardware change renamed a PCI-path NIC. Had it
   been the management interface, the host would have lost its management
-  network. Proposed: name interfaces by MAC address (systemd `.link` files
-  written by the installer and Strata), with a test.
+  network. **Done after this run:** interface names are pinned to MAC
+  addresses (`strata.networking.interfaces`), written by `strata-install`
+  for the management interface.
 - **cloud-init packages:** the VM spec passes only SSH keys to cloud-init;
   images without an SSH server need another step. Proposed: an optional
   `cloudInit.packages` list in the spec (additive).

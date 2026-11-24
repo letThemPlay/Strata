@@ -150,7 +150,7 @@ func TestApplyWritesHostFlake(t *testing.T) {
 		"configuration.nix":          "{ configuration }\n",
 		"flake.lock":                 "{ \"lock\": true }\n",
 		"hardware-configuration.nix": "{ }\n",
-		"host.nix":                   RenderHostNix(in.Answers),
+		"host.nix":                   RenderHostNix(in.Answers, "52:54:00:12:34:56"),
 		"extra-module.nix":           "{ extra }\n",
 	}
 	for _, dir := range []string{in.WorkDir, filepath.Join(in.Target, "etc", "nixos")} {
@@ -289,7 +289,7 @@ func TestPlanChangesNothing(t *testing.T) {
 	if err := in.Plan(&out); err != nil {
 		t.Fatalf("Plan: %v", err)
 	}
-	for _, want := range []string{"hv-02", "/dev/vda, 32.0 GiB, QEMU HARDDISK", "Partitions: none", "eth0, dhcp", "Steps:", "7. Unmount"} {
+	for _, want := range []string{"hv-02", "/dev/vda, 32.0 GiB, QEMU HARDDISK", "Partitions: none", "Management: eth0 (52:54:00:12:34:56, name pinned), dhcp", "Steps:", "7. Unmount"} {
 		if !strings.Contains(out.String(), want) {
 			t.Errorf("plan output lacks %q:\n%s", want, out.String())
 		}

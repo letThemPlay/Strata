@@ -17,11 +17,8 @@ construction, not only by firewall rules.
    interface (`strata.networking.management.interface`) cannot be an
    uplink.
 
-   **Names can change when hardware changes.** PCI-path names (`enp3s0`)
-   include the bus number: adding a drive renamed `enp3s0` to `enp4s0` on a
-   test machine (onboard `eno1` kept its name). Check `ip -br link` after
-   adding or moving hardware and before rebuilding; a missing uplink is
-   refused (`uplink X does not exist`).
+   **Pin the uplink's name to its MAC address** (see [Stable interface
+   names](#stable-interface-names)): otherwise adding hardware can rename it.
 2. Decide per uplink:
    - **Untagged** (an access port, or the native VLAN of a trunk): exactly
      one network uses the NIC.
@@ -57,6 +54,43 @@ construction, not only by firewall rules.
 Guests get addresses from your network (your DHCP server or static
 configuration); the host runs no DHCP or DNS on guest networks.
 
+## Stable interface names
+
+PCI-path interface names (`enp3s0`) contain the bus number. Adding a device
+can change it: on a test machine, adding an NVMe drive renamed `enp3s0` to
+`enp4s0`. Strata configures interfaces by name, so a renamed management
+interface would leave the host without its management network.
+
+Pin each interface Strata uses (the management interface and guest uplinks)
+to its permanent MAC address:
+
+```nix
+strata.networking.interfaces = {
+  eno1.macAddress = "84:47:09:a3:5d:dc";     # management
+  enp4s0.macAddress = "84:47:09:a3:5d:de";   # guest uplink
+};
+```
+
+The NIC with that MAC address then gets that name at every boot, whatever
+the PCI layout (a systemd `.link` file, `10-strata-<name>.link`, in the
+system and the initrd), and Strata's networkd units match it by MAC
+address. `strata-install` pins the management interface of new hosts. An
+unpinned management interface or uplink produces an evaluation warning.
+
+- **Find the MAC address:** `ethtool -P IFACE` prints the permanent one
+  (`ip -br link` shows the current one, which is the same unless something
+  changed it). Use lowercase.
+- **Pin under the current name** to change nothing now: rebuilding applies
+  it without renaming anything, so no connection is interrupted.
+- **Another name** (for example `mgmt0`) takes effect at the next boot: the
+  interface keeps its old name until then. Change the management
+  interface's name in the same rebuild and reboot right away, with console
+  access ready.
+- **If a pinned NIC is replaced or removed,** its name is gone and its
+  network is not configured; `strata-incus-setup` reports
+  `interface X (pinned to MAC) does not exist` or a MAC mismatch. Update
+  the MAC address (from the console, if it is the management interface).
+
 ## What the host does
 
 - Uplinks are brought up by systemd-networkd with no address of any kind
@@ -82,7 +116,7 @@ its own network.
 | Message | Meaning and what to do |
 |---|---|
 | `uplink X is the management interface` | Choose another NIC. (Also refused at evaluation.) |
-| `uplink X does not exist` | Check the name (`ip -br link`); names can change with firmware or slot changes. |
+| `uplink X does not exist` | Check the name (`ip -br link`); unpinned names can change with firmware or slot changes. |
 | `uplink X has IP addresses (...)` | Something else configures the NIC. Remove that configuration: the host must not be on guest networks. |
 | `a host interface or a non-bridge network of this name exists` | Rename the network. |
 

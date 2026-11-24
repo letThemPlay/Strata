@@ -21,7 +21,7 @@
 
     networking.management = {
       # REQUIRED: the management interface (`ip link`). SSH and the node
-      # exporter are reachable only through it.
+      # exporter are reachable only through it. Pin it below.
       # interface = "eno1";
       addressing = "dhcp";
       # For static addressing instead:
@@ -30,6 +30,10 @@
       # gateway4 = "192.0.2.1";
       # dns = [ "192.0.2.53" ];
     };
+
+    # Pin the management interface (and guest uplinks) to its permanent MAC
+    # address (`ethtool -P eno1`), so adding hardware cannot rename it.
+    # networking.interfaces.eno1.macAddress = "84:47:09:a3:5d:dc";
 
     # Workload storage pools on dedicated disks (never the system disk).
     # Disks must be empty; Strata never erases them. See

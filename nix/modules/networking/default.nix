@@ -28,6 +28,24 @@ let
 
   isStatic = mgmt.addressing == "static";
 
+  # Interfaces pinned to their permanent MAC address (ADR-0011): the name
+  # stays the same whatever the PCI layout.
+  pins = ncfg.interfaces;
+  macs = lib.mapAttrsToList (_: p: p.macAddress) pins;
+  duplicateMacs = lib.unique (lib.filter (m: lib.count (x: x == m) macs > 1) macs);
+  # networkd units match a pinned interface by MAC address, so they work
+  # under any name; otherwise by name.
+  matchFor =
+    name:
+    if pins ? ${name} then { PermanentMACAddress = pins.${name}.macAddress; } else { Name = name; };
+  pinLinks = lib.mapAttrs' (
+    name: p:
+    lib.nameValuePair "10-strata-${name}" {
+      matchConfig.PermanentMACAddress = p.macAddress;
+      linkConfig.Name = name;
+    }
+  ) pins;
+
   fw = config.networking.firewall;
   globalOpen =
     map (p: "tcp/${toString p}") fw.allowedTCPPorts
@@ -44,6 +62,29 @@ in
 
   options.strata.networking = {
     enable = mkEnableOption "Strata management networking and host firewall";
+
+    interfaces = mkOption {
+      type = types.attrsOf (
+        types.submodule {
+          options.macAddress = mkOption {
+            type = types.strMatching "([0-9a-f]{2}:){5}[0-9a-f]{2}";
+            example = "84:47:09:a3:5d:dc";
+            description = "Permanent MAC address of the NIC (lowercase; `ethtool -P IFACE`).";
+          };
+        }
+      );
+      default = { };
+      example = {
+        eno1.macAddress = "84:47:09:a3:5d:dc";
+      };
+      description = ''
+        Interface names bound to the NIC with this permanent MAC address. The
+        NIC gets this name at every boot, whatever the PCI layout, so adding
+        or moving hardware cannot rename it. Pin the management interface
+        and guest uplinks; strata-install pins the management interface.
+        A name other than the NIC's current one takes effect after a reboot.
+      '';
+    };
 
     management = {
       interface = mkOption {
@@ -90,59 +131,80 @@ in
     };
   };
 
-  config = mkIf ncfg.enable {
-    assertions = [
-      {
-        assertion = cfg.enable;
-        message = "strata.networking.enable requires strata.enable.";
-      }
-      {
-        assertion = mgmt.interface != null;
-        message = "strata.networking.management.interface must be set.";
-      }
-      {
-        assertion = isStatic -> mgmt.addresses != [ ];
-        message = "strata.networking.management.addresses must not be empty with static addressing.";
-      }
-      {
-        assertion = globalOpen == [ ];
-        message = "strata.networking: ports must not be opened on all interfaces (management isolation). Open them per interface via networking.firewall.interfaces instead. Globally open: ${lib.concatStringsSep ", " globalOpen}";
-      }
-      {
-        assertion =
-          !isStatic
-          -> (mgmt.addresses == [ ] && mgmt.gateway4 == null && mgmt.gateway6 == null && mgmt.dns == [ ]);
-        message = "strata.networking.management: addresses, gateways and dns are only allowed with static addressing.";
-      }
-    ];
+  config = lib.mkMerge [
+    (mkIf (cfg.enable && pins != { }) {
+      assertions = [
+        {
+          assertion = duplicateMacs == [ ];
+          message = "strata.networking.interfaces: MAC addresses pinned twice: ${lib.concatStringsSep ", " duplicateMacs}";
+        }
+      ];
+      # Applied by udev at boot, in the initrd and in the system, while the
+      # interfaces are still down.
+      systemd.network.links = pinLinks;
+      boot.initrd.systemd.network.links = pinLinks;
+    })
 
-    networking = {
-      useNetworkd = true;
-      useDHCP = false;
+    (mkIf ncfg.enable {
+      assertions = [
+        {
+          assertion = cfg.enable;
+          message = "strata.networking.enable requires strata.enable.";
+        }
+        {
+          assertion = mgmt.interface != null;
+          message = "strata.networking.management.interface must be set.";
+        }
+        {
+          assertion = isStatic -> mgmt.addresses != [ ];
+          message = "strata.networking.management.addresses must not be empty with static addressing.";
+        }
+        {
+          assertion = globalOpen == [ ];
+          message = "strata.networking: ports must not be opened on all interfaces (management isolation). Open them per interface via networking.firewall.interfaces instead. Globally open: ${lib.concatStringsSep ", " globalOpen}";
+        }
+        {
+          assertion =
+            !isStatic
+            -> (mgmt.addresses == [ ] && mgmt.gateway4 == null && mgmt.gateway6 == null && mgmt.dns == [ ]);
+          message = "strata.networking.management: addresses, gateways and dns are only allowed with static addressing.";
+        }
+      ];
 
-      nftables.enable = true;
-      firewall = {
-        enable = true;
-        interfaces = mkIf (mgmt.interface != null) {
-          ${mgmt.interface}.allowedTCPPorts = managementPorts;
+      networking = {
+        useNetworkd = true;
+        useDHCP = false;
+
+        nftables.enable = true;
+        firewall = {
+          enable = true;
+          interfaces = mkIf (mgmt.interface != null) {
+            ${mgmt.interface}.allowedTCPPorts = managementPorts;
+          };
         };
       };
-    };
 
-    systemd.network.networks."10-strata-management" = mkIf (mgmt.interface != null) {
-      matchConfig.Name = mgmt.interface;
-      networkConfig = {
-        DHCP = if isStatic then "no" else "yes";
-      }
-      // lib.optionalAttrs (isStatic && mgmt.dns != [ ]) { DNS = mgmt.dns; };
-      address = lib.optionals isStatic mgmt.addresses;
-      gateway = lib.optionals isStatic (
-        lib.filter (g: g != null) [
-          mgmt.gateway4
-          mgmt.gateway6
-        ]
+      warnings = lib.optional (mgmt.interface != null && !(pins ? ${mgmt.interface})) (
+        "strata.networking.management.interface ${mgmt.interface} is not pinned to its MAC address: "
+        + "adding or moving hardware may rename it and cut the host off its management network. "
+        + "Add strata.networking.interfaces.${mgmt.interface}.macAddress (ethtool -P ${mgmt.interface})."
       );
-      linkConfig.RequiredForOnline = "routable";
-    };
-  };
+
+      systemd.network.networks."10-strata-management" = mkIf (mgmt.interface != null) {
+        matchConfig = matchFor mgmt.interface;
+        networkConfig = {
+          DHCP = if isStatic then "no" else "yes";
+        }
+        // lib.optionalAttrs (isStatic && mgmt.dns != [ ]) { DNS = mgmt.dns; };
+        address = lib.optionals isStatic mgmt.addresses;
+        gateway = lib.optionals isStatic (
+          lib.filter (g: g != null) [
+            mgmt.gateway4
+            mgmt.gateway6
+          ]
+        );
+        linkConfig.RequiredForOnline = "routable";
+      };
+    })
+  ];
 }

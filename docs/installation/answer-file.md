@@ -52,7 +52,10 @@ before the disk is touched.
 
 `strata-install plan` additionally checks the file against the machine: the
 disk must exist, be a whole disk of at least 16 GiB, and have nothing
-mounted, used as swap or built on it (LVM, RAID); the interface must exist.
+mounted, used as swap or built on it (LVM, RAID); the interface must exist
+and have a permanent MAC address. The generated `host.nix` pins the
+interface's name to that address (`strata.networking.interfaces.<name>.macAddress`),
+so adding hardware later cannot rename it.
 It lists existing data on the disk (filesystems, inactive ZFS, LVM or RAID
 members, as found by udev), which installing destroys.
 

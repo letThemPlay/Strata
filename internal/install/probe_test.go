@@ -127,3 +127,50 @@ func TestFormatBytes(t *testing.T) {
 		}
 	}
 }
+
+func TestInterfaceMAC(t *testing.T) {
+	fsys := machineFS()
+	if mac, err := InterfaceMAC(fsys, "eth0"); err != nil || mac != "52:54:00:12:34:56" {
+		t.Errorf("InterfaceMAC: %q %v", mac, err)
+	}
+	fsys["sys/class/net/eth0/addr_assign_type"] = file("0\n")
+	if _, err := InterfaceMAC(fsys, "eth0"); err != nil {
+		t.Errorf("permanent address refused: %v", err)
+	}
+	for name, tc := range map[string]struct {
+		modify func(fstest.MapFS)
+		want   string
+	}{
+		"random MAC": {func(m fstest.MapFS) { m["sys/class/net/eth0/addr_assign_type"] = file("1\n") }, "not the NIC's permanent MAC address"},
+		"set MAC":    {func(m fstest.MapFS) { m["sys/class/net/eth0/addr_assign_type"] = file("3\n") }, "not the NIC's permanent MAC address"},
+		"zero MAC":   {func(m fstest.MapFS) { m["sys/class/net/eth0/address"] = file("00:00:00:00:00:00\n") }, "unusable MAC address"},
+		"no address": {func(m fstest.MapFS) { delete(m, "sys/class/net/eth0/address") }, "no MAC address"},
+		"not a MAC":  {func(m fstest.MapFS) { m["sys/class/net/eth0/address"] = file("garbage\n") }, "unusable MAC address"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			fsys := machineFS()
+			tc.modify(fsys)
+			if _, err := InterfaceMAC(fsys, "eth0"); err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("expected %q, got %v", tc.want, err)
+			}
+		})
+	}
+	// Probe reports it for the answer file's interface.
+	fsys = machineFS()
+	fsys["sys/class/net/eth0/addr_assign_type"] = file("1\n")
+	if _, err := Probe(fsys, probeAnswers(t)); err == nil || !strings.Contains(err.Error(), "cannot be pinned") {
+		t.Errorf("Probe: %v", err)
+	}
+}
+
+func TestRenderPinsTheManagementInterface(t *testing.T) {
+	a := mustParse(t, dhcpAnswers)
+	got := RenderHostNix(a, "84:47:09:a3:5d:dc")
+	if !containsLine(got, `networking.interfaces.eth0.macAddress = "84:47:09:a3:5d:dc";`) {
+		t.Errorf("host.nix:\n%s", got)
+	}
+	a.Network.Interface = "eth0.20"
+	if got := RenderHostNix(a, "84:47:09:a3:5d:dc"); !containsLine(got, `networking.interfaces."eth0.20".macAddress = "84:47:09:a3:5d:dc";`) {
+		t.Errorf("quoted attribute:\n%s", got)
+	}
+}

@@ -207,6 +207,14 @@ pkgs.testers.runNixOSTest {
         installed.wait_until_succeeds("grep -Eq '\"trusted\": ?true' /var/lib/strata/backend.json", timeout=60)
         installed.succeed("grep -q '${keys.snakeOilEd25519PublicKey}' /etc/ssh/authorized_keys.d/strata-admin")
 
+    with subtest("the management interface is pinned to its MAC address"):
+        mac = installed.succeed(f"cat /sys/class/net/{nic}/address").strip()
+        installed.succeed(f"grep -F 'networking.interfaces.{nic}.macAddress = \"{mac}\";' /etc/nixos/host.nix")
+        installed.succeed(f"grep -Fx 'PermanentMACAddress={mac}' /etc/systemd/network/10-strata-{nic}.link")
+        installed.succeed(f"grep -Fx 'Name={nic}' /etc/systemd/network/10-strata-{nic}.link")
+        status = installed.succeed(f"networkctl status {nic}")
+        assert "10-strata-management.network" in status, status
+
     with subtest("the admin can log in on the console with the console password"):
         # The hash is root-only and not part of the configuration repository.
         installed.succeed("test \"$(stat -c %a:%U /etc/strata/admin-console-password)\" = 600:root")

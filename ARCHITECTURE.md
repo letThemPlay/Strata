@@ -261,8 +261,9 @@ Known limitations at the end of M2:
 - Operation records are kept in memory only (until M3/M5).
 - Guest networks are bridged or isolated; no NAT or routed networks, no
   bonds, no VLAN or bonded management interface.
-- **NIC names are not stable across hardware changes** (seen on hardware);
-  naming interfaces by MAC address is proposed.
+- NIC names are pinned to MAC addresses (`strata.networking.interfaces`,
+  ADR-0011), since a hardware change renamed a NIC on hardware. Existing
+  hosts must add the pins themselves (a warning asks them to).
 - The VM spec passes only SSH keys to cloud-init (`cloudInit.packages` is
   proposed).
 - The first ZFS pool on a host needs a reboot after the rebuild.
@@ -426,6 +427,19 @@ Known limitations at the end of M2:
   through `br_netfilter`. Uplinks and the VLAN interfaces Incus creates get
   networkd units with no address and `KeepMaster`, so networkd neither
   addresses nor detaches them.
+- **Update (M2 follow-up): stable interface names.** Adding an NVMe drive
+  renamed a PCI-path NIC on hardware. `strata.networking.interfaces.<name>.macAddress`
+  pins a name to a NIC's permanent MAC address with a systemd `.link` file
+  (system and initrd); networkd units for pinned interfaces match by MAC
+  address, the firewall by the (now stable) name. Pinning uses the current
+  name, so a rebuild renames nothing and cannot cut off management;
+  another name takes effect at boot. `strata-install` pins the management
+  interface (refusing a non-permanent MAC); unpinned management interfaces
+  and uplinks produce warnings, not errors, so existing hosts keep
+  building; `strata-host` reports pins whose NIC is missing or has another
+  MAC. Verified by `module-eval`, the installer test and `nixos-nic-names`
+  (two hosts with their NICs in opposite order end up with the same names
+  on the same networks; without the `.link` files the test fails).
 - **Known limitation:** disruptive network changes are not rolled back
   automatically yet. Recovery relies on NixOS generations (`nixos-rebuild
   test`, boot-menu rollback) and console access. Automatic rollback belongs to

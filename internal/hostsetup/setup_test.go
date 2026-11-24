@@ -758,3 +758,32 @@ func TestNoNetworksSentinel(t *testing.T) {
 		t.Errorf("network access %q", got)
 	}
 }
+
+func TestPinnedInterfaces(t *testing.T) {
+	cfg, mount := baseConfig(t)
+	root := hostFS(mount)
+	root["sys/class/net/eno1/address"] = file("84:47:09:A3:5D:DC\n")
+	root["sys/class/net/enp4s0/address"] = file("84:47:09:a3:5d:ff\n")
+	cfg.Interfaces = map[string]string{
+		"eno1":   "84:47:09:a3:5d:dc", // matches (case-insensitive)
+		"enp4s0": "84:47:09:a3:5d:de", // another NIC took the name
+		"enp9s0": "84:47:09:a3:5d:ee", // removed
+	}
+	f := newFakeIncus()
+	err := run(t, cfg, f, root)
+	for _, want := range []string{
+		"interface enp4s0 has MAC address 84:47:09:a3:5d:ff, but is pinned to 84:47:09:a3:5d:de",
+		"interface enp9s0 (pinned to 84:47:09:a3:5d:ee) does not exist",
+	} {
+		if err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("missing %q in %v", want, err)
+		}
+	}
+	if err != nil && strings.Contains(err.Error(), "eno1") {
+		t.Errorf("a matching pin reported: %v", err)
+	}
+	// Everything else is still applied.
+	if _, ok := f.pools["fast"]; !ok || projectConfig(t, f)["restricted"] != "true" {
+		t.Error("a pin mismatch must not stop the setup")
+	}
+}

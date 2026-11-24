@@ -238,6 +238,7 @@
           nixos-storage = import ./nix/tests/nixos/storage.nix { inherit self pkgs; };
           nixos-networks = import ./nix/tests/nixos/networks.nix { inherit self pkgs; };
           nixos-vms = import ./nix/tests/nixos/vms.nix { inherit self pkgs; };
+          nixos-nic-names = import ./nix/tests/nixos/nic-names.nix { inherit self pkgs; };
 
           # The reference host builds for every supported system.
           reference-host = (mkReferenceHost system).config.system.build.toplevel;

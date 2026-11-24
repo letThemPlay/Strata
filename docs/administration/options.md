@@ -172,6 +172,7 @@ and `AllowUsers <admin>` (override with `mkForce` if more users need SSH).
 | Option | Type | Default | Description |
 |---|---|---|---|
 | `strata.networking.enable` | bool | `false` | Manage the management interface with systemd-networkd and enable the nftables firewall. |
+| `strata.networking.interfaces.<name>.macAddress` | MAC address (lowercase) | — | Pin interface `<name>` to the NIC with this permanent MAC address: it gets that name at every boot, and networkd matches it by MAC. Pin the management interface and guest uplinks; an unpinned one produces a warning. See [stable interface names](networking.md#stable-interface-names). |
 | `strata.networking.management.interface` | interface name | `null` | Management interface. Required. |
 | `strata.networking.management.addressing` | `"static"` or `"dhcp"` | `"static"` | Addressing mode. |
 | `strata.networking.management.addresses` | list of CIDR | `[ ]` | Static addresses. Required with `static`; not allowed with `dhcp`. |
@@ -256,6 +257,7 @@ evaluation. systemd-boot keeps at most 10 generations
 - `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, Incus, KVM).
 - `checks.<system>.nixos-incus`: VM test of Incus and the agent's restricted identity (allowed and refused operations, loopback-only API, configuration enforcement).
 - `checks.<system>.nixos-storage`: VM test of storage pools (ZFS mirror, LVM-thin, dir; refusals; adoption; removal; LVM autoactivation; reboot).
+- `checks.<system>.nixos-nic-names`: VM test of interface names pinned to MAC addresses (opposite NIC order on two hosts).
 - `checks.<system>.nixos-vms`: VM test of VM lifecycle through the CLI (needs nested virtualization; boots a NixOS guest).
 - `checks.<system>.nixos-networks`: VM test of guest networks (untagged, VLAN and isolated networks; no host address; no VLAN hopping; access refusals; changes; reboot).
 - `checks.<system>.reference-host`: builds the reference host (the `host` template plus test values).

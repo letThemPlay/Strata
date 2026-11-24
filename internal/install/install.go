@@ -156,7 +156,11 @@ func (in *Installer) describe(w io.Writer, d DiskInfo) {
 		}
 	}
 	n := a.Network
-	fmt.Fprintf(&b, "Management: %s, %s", n.Interface, n.Addressing)
+	fmt.Fprintf(&b, "Management: %s", n.Interface)
+	if mac, err := InterfaceMAC(in.Root, n.Interface); err == nil {
+		fmt.Fprintf(&b, " (%s, name pinned)", mac)
+	}
+	fmt.Fprintf(&b, ", %s", n.Addressing)
 	if n.Addressing == "static" {
 		fmt.Fprintf(&b, " %s", strings.Join(n.Addresses, " "))
 	}
@@ -267,7 +271,11 @@ func (in *Installer) generate(ctx context.Context) error {
 			return err
 		}
 	}
-	if err := writeFile(filepath.Join(in.WorkDir, "host.nix"), []byte(RenderHostNix(in.Answers))); err != nil {
+	mac, err := InterfaceMAC(in.Root, in.Answers.Network.Interface)
+	if err != nil {
+		return err
+	}
+	if err := writeFile(filepath.Join(in.WorkDir, "host.nix"), []byte(RenderHostNix(in.Answers, mac))); err != nil {
 		return err
 	}
 

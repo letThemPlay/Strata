@@ -16,7 +16,7 @@ func TestRenderHostNixGolden(t *testing.T) {
 		{"host-dhcp.nix", dhcpAnswers},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			got := RenderHostNix(mustParse(t, tt.answers))
+			got := RenderHostNix(mustParse(t, tt.answers), "52:54:00:12:34:56")
 			golden := filepath.Join("testdata", tt.name)
 			if *update {
 				if err := os.WriteFile(golden, []byte(got), 0o600); err != nil {
@@ -57,7 +57,7 @@ func TestRenderHostNixEscapesKeyComments(t *testing.T) {
 	if err := a.Validate(); err != nil {
 		t.Fatalf("test key should be valid: %v", err)
 	}
-	got := RenderHostNix(a)
+	got := RenderHostNix(a, "52:54:00:12:34:56")
 	want := `"` + strings.Fields(a.Admin.AuthorizedKeys[0])[0] + " " + strings.Fields(a.Admin.AuthorizedKeys[0])[1] + ` x\"; } // \${builtins.abort \"pwned\"}"`
 	if !containsLine(got, want) {
 		t.Errorf("key not escaped as %s:\n%s", want, got)

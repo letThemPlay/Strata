@@ -21,5 +21,9 @@
       interface = "eth0";
       addressing = "dhcp";
     };
+
+    # The management interface keeps its name (and the host its
+    # management network) even if adding hardware changes the PCI layout.
+    networking.interfaces.eth0.macAddress = "52:54:00:12:34:56";
   };
 }

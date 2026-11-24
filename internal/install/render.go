@@ -2,17 +2,19 @@ package install
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 )
 
 // RenderHostNix renders the host.nix module of the host flake from
-// validated answers.
+// validated answers. mac is the management interface's permanent MAC
+// address; its name is pinned to it (strata.networking.interfaces).
 //
 // Values are only ever emitted as Nix string literals (see nixString), so
 // answer file content cannot become Nix code. The output is nixfmt
 // formatted; the golden-file tests and the repository's nix-fmt check
 // keep it that way.
-func RenderHostNix(a Answers) string {
+func RenderHostNix(a Answers, mac string) string {
 	var b strings.Builder
 	w := func(indent int, format string, args ...any) {
 		b.WriteString(strings.Repeat("  ", indent))
@@ -68,10 +70,25 @@ func RenderHostNix(a Answers) string {
 		list(3, "dns", n.DNS)
 	}
 	w(2, "};")
+	b.WriteByte('\n')
+	w(2, "# The management interface keeps its name (and the host its")
+	w(2, "# management network) even if adding hardware changes the PCI layout.")
+	w(2, "networking.interfaces.%s.macAddress = %s;", nixAttr(n.Interface), nixString(mac))
 	w(1, "};")
 	w(0, "}")
 	return b.String()
 }
+
+// nixAttr returns name as a Nix attribute name, quoted unless it is a
+// plain identifier.
+func nixAttr(name string) string {
+	if plainAttr.MatchString(name) {
+		return name
+	}
+	return nixString(name)
+}
+
+var plainAttr = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_-]*$`)
 
 // nixString returns s as a double-quoted Nix string literal. Backslashes,
 // double quotes and the interpolation sequence "${" are escaped, as are

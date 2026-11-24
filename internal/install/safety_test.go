@@ -153,7 +153,7 @@ func TestConsolePasswordHashValidation(t *testing.T) {
 func TestRenderReferencesConsolePasswordFileNotHash(t *testing.T) {
 	a := mustParse(t, dhcpAnswers)
 	a.Admin.ConsolePasswordHash = testHash
-	got := RenderHostNix(a)
+	got := RenderHostNix(a, "52:54:00:12:34:56")
 	if !containsLine(got, `consolePasswordFile = "/etc/strata/admin-console-password";`) || strings.Contains(got, testHash) {
 		t.Errorf("host.nix:\n%s", got)
 	}

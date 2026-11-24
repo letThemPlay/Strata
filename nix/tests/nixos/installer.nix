@@ -108,8 +108,11 @@ pkgs.testers.runNixOSTest {
     installer.succeed(
         "echo 'type=linux' | sfdisk --quiet --label gpt /dev/vda",
         "mkfs.ext4 -q -L olddata /dev/vda1",
-        "udevadm settle",
     )
+    # The wizard reads existing data from the udev database; `udevadm
+    # settle` alone can return before udev has seen the new filesystem.
+    installer.succeed("udevadm trigger --action=change --settle /dev/vda1")
+    installer.wait_until_succeeds("udevadm info --query=property /dev/vda1 | grep -qx ID_FS_LABEL=olddata", timeout=30)
 
     def wizard_input(*extra):
         """Answers to strata-install init on this VM, then extra lines."""

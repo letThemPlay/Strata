@@ -24,7 +24,7 @@ func run() int {
 	cmd := cli.Command{
 		Name:        "strata",
 		Summary:     "Strata command-line client",
-		Subcommands: []cli.Subcommand{vmcli.Subcommand()},
+		Subcommands: []cli.Subcommand{vmcli.Subcommand(os.Stdin)},
 	}
 	return cmd.Run(ctx, os.Args[1:], os.Stdout, os.Stderr)
 }

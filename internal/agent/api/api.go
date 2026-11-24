@@ -42,6 +42,9 @@ type VMs interface {
 	GetVM(ctx context.Context, name string) (workload.VMStatus, error)
 	CreateVM(ctx context.Context, vm workload.VM) error
 	VMAction(ctx context.Context, name, action string, force bool, timeoutSeconds int) error
+	PlanVM(ctx context.Context, vm workload.VM) (workload.Plan, error)
+	UpdateVM(ctx context.Context, vm workload.VM, planID string, stopTimeout int) (workload.Plan, error)
+	DeleteVM(ctx context.Context, name string, stop bool, stopTimeout int) ([]string, error)
 }
 
 // Server is the local API.
@@ -80,6 +83,9 @@ type Operation struct {
 	Error       string    `json:"error,omitempty"`
 	CreatedAt   time.Time `json:"createdAt"`
 	CompletedAt time.Time `json:"completedAt,omitzero"`
+	// Result is what a successful operation produced: the applied plan
+	// (update) or the kept data volumes (delete).
+	Result any `json:"result,omitempty"`
 	// UID is the caller who requested it.
 	UID uint32 `json:"uid"`
 }
@@ -142,6 +148,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("GET /api/v1/vms", s.listVMs)
 	mux.HandleFunc("POST /api/v1/vms", s.createVM)
 	mux.HandleFunc("GET /api/v1/vms/{name}", s.getVM)
+	mux.HandleFunc("PUT /api/v1/vms/{name}", s.updateVM)
+	mux.HandleFunc("DELETE /api/v1/vms/{name}", s.deleteVM)
 	mux.HandleFunc("POST /api/v1/vms/{name}/{action}", s.vmAction)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.getOperation)
 	return s.authorize(mux)
@@ -227,6 +235,10 @@ func writeProviderError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", err)
 	case errors.Is(err, workload.ErrExists):
 		writeError(w, http.StatusConflict, "exists", err)
+	case errors.Is(err, workload.ErrConflict):
+		writeError(w, http.StatusConflict, "conflict", err)
+	case errors.Is(err, workload.ErrRefused):
+		writeError(w, http.StatusUnprocessableEntity, "refused", err)
 	default:
 		writeError(w, http.StatusBadGateway, "backend", err)
 	}
@@ -279,7 +291,75 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", err)
 		return
 	}
-	s.start(w, r, "create", vm.Name, func(ctx context.Context, p VMs) error { return p.CreateVM(ctx, vm) })
+	s.start(w, r, "create", vm.Name, func(ctx context.Context, p VMs) (any, error) { return nil, p.CreateVM(ctx, vm) })
+}
+
+// KeptVolumes is the result of a delete operation.
+type KeptVolumes struct {
+	// KeptVolumes are the VM's data volumes ("pool/volume"), which are
+	// never deleted with it.
+	KeptVolumes []string `json:"keptVolumes"`
+}
+
+// updateVM returns the plan for a spec (?plan=true) or applies the plan
+// confirmed by its ID (?confirm=ID).
+func (s *Server) updateVM(w http.ResponseWriter, r *http.Request) {
+	vm, err := workload.ParseVM(r.Body)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", err)
+		return
+	}
+	name := r.PathValue("name")
+	if vm.Name != name {
+		writeError(w, http.StatusBadRequest, "invalid", fmt.Errorf("the spec is for %q, not %q", vm.Name, name))
+		return
+	}
+	q := r.URL.Query()
+	switch {
+	case q.Get("plan") == "true":
+		p, release, ok := s.provider(w)
+		if !ok {
+			return
+		}
+		defer release()
+		plan, err := p.PlanVM(r.Context(), vm)
+		if err != nil {
+			writeProviderError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, plan)
+	case q.Get("confirm") != "":
+		id := q.Get("confirm")
+		s.start(w, r, "update", name, func(ctx context.Context, p VMs) (any, error) {
+			plan, err := p.UpdateVM(ctx, vm, id, DefaultStopTimeout)
+			if err != nil {
+				return nil, err //nolint:wrapcheck // Provider errors name the VM and step.
+			}
+			return plan, nil
+		})
+	default:
+		writeError(w, http.StatusBadRequest, "invalid", errors.New("use ?plan=true to see the plan, then ?confirm=PLAN_ID to apply it"))
+	}
+}
+
+// deleteVM deletes a VM; ?confirm must repeat its name (typed
+// confirmation), and ?stop=true allows stopping a running VM first.
+func (s *Server) deleteVM(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("name")
+	q := r.URL.Query()
+	if q.Get("confirm") != name {
+		writeError(w, http.StatusBadRequest, "confirmation",
+			fmt.Errorf("deleting vm %s removes its root disk: confirm with its name (confirm=%s)", name, name))
+		return
+	}
+	stop := q.Get("stop") == "true"
+	s.start(w, r, "delete", name, func(ctx context.Context, p VMs) (any, error) {
+		kept, err := p.DeleteVM(ctx, name, stop, DefaultStopTimeout)
+		if err != nil {
+			return nil, err //nolint:wrapcheck // Provider errors name the VM and step.
+		}
+		return KeptVolumes{KeptVolumes: kept}, nil
+	})
 }
 
 func (s *Server) vmAction(w http.ResponseWriter, r *http.Request) {
@@ -300,13 +380,13 @@ func (s *Server) vmAction(w http.ResponseWriter, r *http.Request) {
 		}
 		timeout = n
 	}
-	s.start(w, r, action, name, func(ctx context.Context, p VMs) error {
-		return p.VMAction(ctx, name, action, force, timeout)
+	s.start(w, r, action, name, func(ctx context.Context, p VMs) (any, error) {
+		return nil, p.VMAction(ctx, name, action, force, timeout)
 	})
 }
 
 // start runs fn as an operation on VM name and replies 202 with it.
-func (s *Server) start(w http.ResponseWriter, r *http.Request, kind, name string, fn func(context.Context, VMs) error) {
+func (s *Server) start(w http.ResponseWriter, r *http.Request, kind, name string, fn func(context.Context, VMs) (any, error)) {
 	p, release, ok := s.provider(w)
 	if !ok {
 		return
@@ -344,13 +424,13 @@ func (s *Server) start(w http.ResponseWriter, r *http.Request, kind, name string
 		ctx, cancel := context.WithTimeout(base, operationTimeout)
 		defer cancel()
 		s.update(id, func(o *Operation) { o.Status = StatusApplying })
-		err := fn(ctx, p)
+		result, err := fn(ctx, p)
 		s.update(id, func(o *Operation) {
 			o.CompletedAt = time.Now().UTC()
 			if err != nil {
 				o.Status, o.Error = StatusFailed, err.Error()
 			} else {
-				o.Status = StatusSucceeded
+				o.Status, o.Result = StatusSucceeded, result
 			}
 		})
 		s.mu.Lock()

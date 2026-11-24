@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
@@ -25,6 +26,12 @@ type fakeVMServer struct {
 	// noStart leaves the status unchanged on start.
 	noStart bool
 	deletes []string
+	// calls records state changes, puts and deletes in order.
+	calls []string
+	// failPut makes instance updates fail.
+	failPut bool
+	// lastSource is the source of the last instance creation.
+	lastSource map[string]any
 }
 
 func reply(w http.ResponseWriter, code int, v any) {
@@ -55,6 +62,7 @@ func (f *fakeVMServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		name := body["name"].(string)
+		f.lastSource, _ = body["source"].(map[string]any)
 		inst := map[string]any{"name": name, "type": body["type"], "status": "Stopped", "config": body["config"], "devices": body["devices"]}
 		if f.tamper != nil {
 			f.tamper(inst)
@@ -63,9 +71,23 @@ func (f *fakeVMServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		reply(w, 200, nil)
 	case strings.HasPrefix(p, "/1.0/instances/") && strings.HasSuffix(p, "/state") && r.Method == http.MethodPut:
 		name := strings.TrimSuffix(strings.TrimPrefix(p, "/1.0/instances/"), "/state")
+		f.calls = append(f.calls, body["action"].(string))
 		if !f.noStart {
 			f.instances[name]["status"] = map[string]string{"start": "Running", "stop": "Stopped", "restart": "Running"}[body["action"].(string)]
 		}
+		reply(w, 200, nil)
+	case strings.HasPrefix(p, "/1.0/instances/") && r.Method == http.MethodPut:
+		name := strings.TrimPrefix(p, "/1.0/instances/")
+		f.calls = append(f.calls, "put")
+		if f.failPut {
+			reply(w, 400, "Invalid device")
+			return
+		}
+		f.instances[name]["config"], f.instances[name]["devices"] = body["config"], body["devices"]
+		reply(w, 200, nil)
+	case strings.HasPrefix(p, "/1.0/instances/") && r.Method == http.MethodDelete:
+		delete(f.instances, strings.TrimPrefix(p, "/1.0/instances/"))
+		f.calls = append(f.calls, "delete")
 		reply(w, 200, nil)
 	case strings.HasPrefix(p, "/1.0/instances/") && r.Method == http.MethodGet:
 		inst, ok := f.instances[strings.TrimPrefix(p, "/1.0/instances/")]
@@ -233,5 +255,149 @@ func TestUnmanagedInstancesAreInvisible(t *testing.T) {
 	}
 	if err := c.VMAction(context.Background(), "manual", workload.ActionStop, true, 0); !errors.Is(err, workload.ErrNotFound) {
 		t.Errorf("VMAction: %v", err)
+	}
+}
+
+func createdVM(t *testing.T, running bool) (*fakeVMServer, *Client) {
+	t.Helper()
+	f, c := newFakeVMs(t)
+	if err := c.CreateVM(context.Background(), testVM()); err != nil {
+		t.Fatal(err)
+	}
+	if running {
+		f.instances["web-01"]["status"] = "Running"
+	}
+	f.instances["web-01"]["config"].(map[string]any)["volatile.uuid"] = "keep-me"
+	f.calls = nil
+	return f, c
+}
+
+func bigger() workload.VM {
+	vm := testVM()
+	vm.Resources = workload.Resources{CPU: 4, Memory: "2GiB"}
+	vm.Disks = append(vm.Disks, workload.Disk{Name: "logs", Size: "5GiB", Pool: "bulk"})
+	return vm
+}
+
+func TestUpdateRunningVM(t *testing.T) {
+	f, c := createdVM(t, true)
+	ctx := context.Background()
+	plan, err := c.PlanVM(ctx, bigger())
+	if err != nil || !plan.Restart || plan.Empty() {
+		t.Fatalf("plan %+v %v", plan, err)
+	}
+	if _, err := c.UpdateVM(ctx, bigger(), plan.ID, 30); err != nil {
+		t.Fatalf("UpdateVM: %v", err)
+	}
+	if got := strings.Join(f.calls, ","); got != "stop,put,start" {
+		t.Errorf("calls %s", got)
+	}
+	cfg := f.instances["web-01"]["config"].(map[string]any)
+	if cfg["limits.cpu"] != "4" || cfg["volatile.uuid"] != "keep-me" {
+		t.Errorf("config %v", cfg)
+	}
+	if !f.volumes["bulk/web-01-logs"] || f.instances["web-01"]["status"] != "Running" {
+		t.Errorf("volume or status: %v %v", f.volumes, f.instances["web-01"]["status"])
+	}
+	// The stored spec is the new one: planning again changes nothing.
+	if again, err := c.PlanVM(ctx, bigger()); err != nil || !again.Empty() {
+		t.Errorf("plan after update: %+v %v", again, err)
+	}
+}
+
+func TestUpdateRefusesStalePlan(t *testing.T) {
+	f, c := createdVM(t, false)
+	ctx := context.Background()
+	plan, _ := c.PlanVM(ctx, bigger())
+	f.instances["web-01"]["status"] = "Running" // started since the plan
+	_, err := c.UpdateVM(ctx, bigger(), plan.ID, 30)
+	if !errors.Is(err, workload.ErrConflict) || !strings.Contains(err.Error(), "plan again") || len(f.calls) != 0 {
+		t.Errorf("stale plan: %v, calls %v", err, f.calls)
+	}
+}
+
+func TestUpdateRefusesDrift(t *testing.T) {
+	f, c := createdVM(t, false)
+	f.instances["web-01"]["config"].(map[string]any)["limits.cpu"] = "16" // changed with incus directly
+	_, err := c.PlanVM(context.Background(), bigger())
+	if !errors.Is(err, workload.ErrConflict) || !strings.Contains(err.Error(), "changed outside Strata") {
+		t.Errorf("drift: %v", err)
+	}
+}
+
+func TestUpdateFailureRestores(t *testing.T) {
+	f, c := createdVM(t, true)
+	f.failPut = true
+	ctx := context.Background()
+	plan, _ := c.PlanVM(ctx, bigger())
+	_, err := c.UpdateVM(ctx, bigger(), plan.ID, 30)
+	if err == nil || !strings.Contains(err.Error(), "Invalid device") {
+		t.Fatalf("got %v", err)
+	}
+	if got := strings.Join(f.calls, ","); got != "stop,put,start" {
+		t.Errorf("calls %s (the VM must be started again)", got)
+	}
+	if f.volumes["bulk/web-01-logs"] || !f.volumes["bulk/web-01-data"] {
+		t.Errorf("only the new volume is removed: %v", f.volumes)
+	}
+}
+
+func TestUpdateDetachKeepsVolume(t *testing.T) {
+	f, c := createdVM(t, false)
+	vm := testVM()
+	vm.Disks = vm.Disks[:1]
+	plan, _ := c.PlanVM(context.Background(), vm)
+	if _, err := c.UpdateVM(context.Background(), vm, plan.ID, 30); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := f.instances["web-01"]["devices"].(map[string]any)["data"]; ok || !f.volumes["bulk/web-01-data"] {
+		t.Errorf("devices %v volumes %v", f.instances["web-01"]["devices"], f.volumes)
+	}
+	if got := strings.Join(f.calls, ","); got != "put" {
+		t.Errorf("a stopped VM is changed without stop/start: %s", got)
+	}
+}
+
+func TestDeleteVM(t *testing.T) {
+	f, c := createdVM(t, true)
+	ctx := context.Background()
+	if _, err := c.DeleteVM(ctx, "web-01", false, 30); !errors.Is(err, workload.ErrConflict) {
+		t.Errorf("running without stop: %v", err)
+	}
+	kept, err := c.DeleteVM(ctx, "web-01", true, 30)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(kept, ",") != "bulk/web-01-data" || !f.volumes["bulk/web-01-data"] {
+		t.Errorf("kept %v volumes %v", kept, f.volumes)
+	}
+	if got := strings.Join(f.calls, ","); got != "stop,delete" {
+		t.Errorf("calls %s", got)
+	}
+	if _, err := c.DeleteVM(ctx, "web-01", true, 30); !errors.Is(err, workload.ErrNotFound) {
+		t.Errorf("second delete: %v", err)
+	}
+}
+
+func TestCreateFromImageServer(t *testing.T) {
+	f, c := newFakeVMs(t)
+	vm := testVM()
+	vm.ImageServer, vm.Image = "images.linuxcontainers.org", "debian/13/cloud"
+	if err := c.CreateVM(context.Background(), vm); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"type": "image", "alias": "debian/13/cloud",
+		"server": "https://images.linuxcontainers.org", "protocol": "simplestreams",
+	}
+	if fmt.Sprint(f.lastSource) != fmt.Sprint(want) {
+		t.Errorf("source %v", f.lastSource)
+	}
+	f2, c2 := newFakeVMs(t)
+	if err := c2.CreateVM(context.Background(), testVM()); err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(f2.lastSource) != fmt.Sprint(map[string]any{"type": "image", "alias": "debian-13"}) {
+		t.Errorf("local source %v", f2.lastSource)
 	}
 }

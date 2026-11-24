@@ -165,13 +165,15 @@ func (c *Client) Wait(ctx context.Context, op api.Operation) (api.Operation, err
 	return op, nil
 }
 
-// Subcommand returns `strata vm`.
-func Subcommand() cli.Subcommand {
+// Subcommand returns `strata vm`; confirmations are read from stdin.
+func Subcommand(stdin io.Reader) cli.Subcommand {
 	return cli.Subcommand{
 		Name:    "vm",
-		Usage:   "list|show|create|start|stop|restart ...",
+		Usage:   "list|show|create|update|start|stop|restart|delete ...",
 		Summary: "Manage virtual machines on this host",
-		Run:     run,
+		Run: func(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+			return run(ctx, args, stdin, stdout, stderr)
+		},
 	}
 }
 
@@ -183,9 +185,11 @@ const usage = `Usage: strata vm COMMAND [--socket PATH] ...
   start NAME                          Start a VM
   stop NAME [--force] [--timeout S]   Stop a VM (graceful; forced after S seconds with --force)
   restart NAME [--timeout S]          Restart a VM
+  update -f FILE [--yes]              Show the plan for a changed spec and apply it after confirmation
+  delete NAME --confirm NAME [--stop] Delete a VM and its root disk; data volumes are kept
 `
 
-func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
+func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.Writer) int {
 	if len(args) == 0 || args[0] == "-h" || args[0] == "--help" || args[0] == "help" {
 		_, _ = fmt.Fprint(stderr, usage)
 		if len(args) == 0 {
@@ -201,6 +205,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	file := fset.String("f", "", "VM spec file (- for standard input)")
 	force := fset.Bool("force", false, "force stop if the guest does not shut down in time")
 	timeout := fset.Int("timeout", -1, "seconds to wait for a graceful stop (default 60)")
+	yes := fset.Bool("yes", false, "apply the plan without asking")
+	confirm := fset.String("confirm", "", "the VM's name, to confirm deleting it")
+	stop := fset.Bool("stop", false, "stop a running VM before deleting it")
 	// Flags may come before or after the VM name.
 	var positional []string
 	for {
@@ -288,6 +295,54 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 			return fail(err)
 		}
 		return finish(c.CreateVM(ctx, strings.NewReader(spec)))
+	case "update":
+		if *file == "" || len(positional) != 0 {
+			_, _ = fmt.Fprintln(stderr, "strata vm update: -f FILE is required")
+			return cli.ExitUsage
+		}
+		spec, err := readSpec(*file)
+		if err != nil {
+			return fail(err)
+		}
+		vm, err := workload.ParseVM(strings.NewReader(spec))
+		if err != nil {
+			return fail(err)
+		}
+		plan, err := c.Plan(ctx, vm.Name, spec)
+		if err != nil {
+			return fail(err)
+		}
+		printPlan(stdout, plan)
+		if plan.Empty() {
+			return cli.ExitOK
+		}
+		if !*yes && !ask(stdin, stdout, "Apply? [y/N] ") {
+			_, _ = fmt.Fprintln(stdout, "Nothing was changed.")
+			return cli.ExitError
+		}
+		return finish(c.Apply(ctx, vm.Name, spec, plan.ID))
+	case "delete":
+		name, ok := needName()
+		if !ok {
+			return cli.ExitUsage
+		}
+		if *confirm != name {
+			_, _ = fmt.Fprintf(stderr, "strata vm delete: deleting %s removes its root disk; confirm with --confirm %s\n", name, name)
+			return cli.ExitUsage
+		}
+		op, err := c.Delete(ctx, name, *stop)
+		if code := finish(op, err); code != cli.ExitOK {
+			return code
+		}
+		op, _ = c.Wait(ctx, op)
+		var kept api.KeptVolumes
+		if data, err := json.Marshal(op.Result); err == nil {
+			_ = json.Unmarshal(data, &kept)
+		}
+		if len(kept.KeptVolumes) > 0 {
+			_, _ = fmt.Fprintf(stdout, "Data volumes kept (not deleted): %s\n", strings.Join(kept.KeptVolumes, ", "))
+		}
+		return cli.ExitOK
 	case workload.ActionStart, workload.ActionStop, workload.ActionRestart:
 		name, ok := needName()
 		if !ok {
@@ -298,6 +353,73 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 		_, _ = fmt.Fprintf(stderr, "strata vm: unknown command %q\n\n%s", cmd, usage)
 		return cli.ExitUsage
 	}
+}
+
+// Plan returns the agent's plan for a changed spec.
+func (c *Client) Plan(ctx context.Context, name, spec string) (workload.Plan, error) {
+	var p workload.Plan
+	return p, c.do(ctx, http.MethodPut, "/api/v1/vms/"+url.PathEscape(name)+"?plan=true", strings.NewReader(spec), &p)
+}
+
+// Apply applies the plan confirmed by its ID and returns the operation.
+func (c *Client) Apply(ctx context.Context, name, spec, planID string) (api.Operation, error) {
+	var op api.Operation
+	path := "/api/v1/vms/" + url.PathEscape(name) + "?" + url.Values{"confirm": {planID}}.Encode()
+	return op, c.do(ctx, http.MethodPut, path, strings.NewReader(spec), &op)
+}
+
+// Delete deletes a VM (confirmed by its name) and returns the operation.
+func (c *Client) Delete(ctx context.Context, name string, stop bool) (api.Operation, error) {
+	q := url.Values{"confirm": {name}}
+	if stop {
+		q.Set("stop", "true")
+	}
+	var op api.Operation
+	return op, c.do(ctx, http.MethodDelete, "/api/v1/vms/"+url.PathEscape(name)+"?"+q.Encode(), nil, &op)
+}
+
+func printPlan(w io.Writer, p workload.Plan) {
+	state := "stopped"
+	if p.Running {
+		state = "running"
+	}
+	if p.Empty() {
+		_, _ = fmt.Fprintf(w, "No changes for %s.\n", p.VM)
+		return
+	}
+	_, _ = fmt.Fprintf(w, "Plan for %s (%s), plan %s:\n", p.VM, state, p.ID)
+	tw := tabwriter.NewWriter(w, 0, 4, 2, ' ', 0)
+	for _, ch := range p.Changes {
+		change := ch.From + " -> " + ch.To
+		switch {
+		case ch.From == "":
+			change = "+ " + ch.To
+		case ch.To == "":
+			change = "- " + ch.From
+		}
+		var notes []string
+		if ch.Restart && p.Running {
+			notes = append(notes, "restart")
+		}
+		if ch.Note != "" {
+			notes = append(notes, ch.Note)
+		}
+		_, _ = fmt.Fprintf(tw, "  %s\t%s\t%s\n", ch.Field, change, strings.Join(notes, "; "))
+	}
+	_ = tw.Flush()
+	if p.Restart {
+		_, _ = fmt.Fprintln(w, "The VM will be stopped gracefully, changed and started again.")
+	}
+}
+
+func ask(stdin io.Reader, stdout io.Writer, question string) bool {
+	_, _ = fmt.Fprint(stdout, question)
+	var answer string
+	if _, err := fmt.Fscanln(stdin, &answer); err != nil {
+		return false
+	}
+	answer = strings.ToLower(strings.TrimSpace(answer))
+	return answer == "y" || answer == "yes"
 }
 
 func readSpec(file string) (string, error) {

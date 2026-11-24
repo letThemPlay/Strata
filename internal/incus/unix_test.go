@@ -57,7 +57,7 @@ func TestUnixAsyncOperation(t *testing.T) {
 		t.Errorf("body %q, query %q (no project for the server-wide client)", gotBody, gotQuery)
 	}
 	err := c.Do(ctx, http.MethodDelete, "/1.0/storage-pools/p", nil, nil)
-	if err == nil || !strings.Contains(err.Error(), "Failed to create pool") {
+	if err == nil || !strings.Contains(err.Error(), "DELETE /1.0/storage-pools/p: operation failed: Failed to create pool") {
 		t.Errorf("async failure: %v", err)
 	}
 	err = c.Do(ctx, http.MethodGet, "/1.0/projects/missing", nil, nil)

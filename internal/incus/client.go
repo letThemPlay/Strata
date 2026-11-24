@@ -233,7 +233,8 @@ func (c *Client) wait(ctx context.Context, method, path, op string, out any) err
 		if msg == "" {
 			msg = "operation " + result.Status
 		}
-		return &APIError{Method: method, Path: path, StatusCode: http.StatusOK, Message: msg}
+		// StatusCode 0: the request was accepted; the operation failed.
+		return &APIError{Method: method, Path: path, Message: msg}
 	}
 	if out != nil && len(result.Metadata) > 0 && string(result.Metadata) != "null" {
 		if err := json.Unmarshal(result.Metadata, out); err != nil {
@@ -301,6 +302,9 @@ type APIError struct {
 }
 
 func (e *APIError) Error() string {
+	if e.StatusCode == 0 {
+		return fmt.Sprintf("incus: %s %s: operation failed: %s", e.Method, e.Path, e.Message)
+	}
 	return fmt.Sprintf("incus: %s %s: HTTP %d: %s", e.Method, e.Path, e.StatusCode, e.Message)
 }
 

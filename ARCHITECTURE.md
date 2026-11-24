@@ -1,8 +1,8 @@
 # Strata Architecture
 
-**Status:** Milestone M1 complete; M2 in progress (slices 1–3: Incus host,
-the agent's restricted identity, storage pools, guest networks). Incus is the
-workload backend (ADR-0015). This document describes the target
+**Status:** Milestone M1 complete; M2 in progress (slices 1–4a: Incus host,
+the agent's restricted identity, storage pools, guest networks, VM lifecycle
+through the CLI). Incus is the workload backend (ADR-0015). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
 
@@ -90,9 +90,9 @@ today:
 |---|---|
 | `flake.nix`, `flake.lock` | Pinned build, NixOS modules, dev shell, formatter, checks |
 | `go.mod` | Go module `github.com/letthemplay/Strata` |
-| `cmd/strata` | CLI client (`version`/`help` only) |
+| `cmd/strata` | CLI client: `strata vm` (local agent API) |
 | `cmd/strata-api` | Management API server (`version`/`help` only) |
-| `cmd/strata-agent` | Node agent: `run`, `discover` |
+| `cmd/strata-agent` | Node agent: `run` (discovery, backend status, local API), `discover` |
 | `cmd/strata-controller` | Control-plane controller (`version`/`help` only) |
 | `cmd/strata-install` | Host installer: `plan`, `apply` |
 | `internal/version` | Build metadata injected via `-ldflags` |
@@ -100,7 +100,10 @@ today:
 | `internal/hardware` | Hardware discovery from procfs/sysfs (no exec) |
 | `internal/agent` | Agent run loop, atomic report writing, agent subcommands |
 | `internal/install` | Answer file, `host.nix` rendering, disk and NIC probing, installation steps |
-| `internal/incus` | Minimal Incus API client: loopback HTTPS with a client identity and pinned server certificate (agent); Unix socket (`strata-host` only) |
+| `internal/incus` | Incus API client: loopback HTTPS with a client identity and pinned server certificate (agent); Unix socket (`strata-host` only); VM provider |
+| `internal/workload` | Backend-neutral workload schemas (`vm.strata.dev/v1alpha1`) and provider errors |
+| `internal/agent/api` | The agent's local API (Unix socket, peer-uid authorization, audit, operations) |
+| `internal/vmcli` | `strata vm` |
 | `internal/blockdev` | Block device inspection (procfs, sysfs, udev database): resolution, signatures, uses, system disks; shared by the installer and pool setup |
 | `internal/hostsetup`, `cmd/strata-host` | Root-only Incus setup run by NixOS: project, agent identity and trust, storage pools |
 | `nix/packages/` | Package definitions (`strata`) |
@@ -115,7 +118,7 @@ today:
 | `.github/workflows/` | CI |
 
 Planned (not yet created):
-`internal/{workload,networking,...}` (M2+), `internal/{gitops,schema,
+`internal/{networking,...}` (later), `internal/{gitops,schema,
 planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 `internal/cluster` (M6).
 
@@ -140,7 +143,9 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | Physical hardware validation | **Passed** (M1 slice 5): Intel (Lenovo ThinkServer TS140) and AMD (GMKtec M6 Ultra). See [results](docs/installation/hardware-validation.md#results) |
 | `strata.storage` pools on dedicated disks (ZFS, LVM-thin, dir), project limits, LVM autoactivation policy | **Implemented** (M2 slice 2, experimental; ADR-0018) |
 | `strata.networking.guest` networks (Incus bridges on uplinks, untagged or VLAN, or isolated; no host address) | **Implemented** (M2 slice 3, experimental; ADR-0019) |
-| VM schema and lifecycle; NAT/routed guest networks; bonds | Planned (M2 slice 4; later), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
+| VM schema `vm.strata.dev/v1alpha1`; `strata vm create/list/show/start/stop/restart` through the agent's local API (operations, verification, audit) | **Implemented** (M2 slice 4a, experimental; ADR-0020, ADR-0021) |
+| `strata vm update` (plan) and `delete` (typed confirmation); image server allow-list; M2 hardware validation | Planned (M2 slice 4b) |
+| NAT/routed guest networks; bonds | Planned (later) |
 | GitOps, IR, planner, reconciler | Planned (M3) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
@@ -229,7 +234,13 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
 3. Guest networks: Incus bridges declared in NixOS, on uplinks (untagged
    or VLAN) or isolated, with no host address; the project may use exactly
    the declared networks (ADR-0019). **Done.**
-4. VM schema, the Incus provider and VM lifecycle through the CLI. Planned.
+4. VM management through the CLI, in two parts:
+   - 4a: the VM schema, the Incus VM provider, the agent's local API with
+     operations, verification and audit, and `strata vm create/list/show/
+     start/stop/restart` (ADR-0020, ADR-0021). **Done.**
+   - 4b: `update` with a plan of disruptive and destructive changes,
+     `delete` with typed confirmation, the image server allow-list, and
+     the M2 hardware validation. Planned.
 
 ## Architecture decision records
 
@@ -697,6 +708,10 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
   - Snapshots and backups are blocked by the project restrictions until the
     storage slice decides them; image sources (`restricted.images.servers`)
     are decided with the VM schema slice.
+- **Update (M2 slice 4a):** the project's `restricted.images.servers` is
+  set to a name that is never a server, so Incus downloads no image on the
+  project's behalf. Until then an empty value had allowed every server
+  (Incus's default), although the agent itself has no network access.
 - **Update (M2 slice 2):** the setup is now `strata-host incus-setup`
   (Go, `internal/hostsetup`), reading a JSON description of the desired
   state that NixOS generates, instead of a shell script; it runs again
@@ -828,3 +843,61 @@ M2 ("manage VMs through the CLI") is delivered in slices, through Incus
   undeclared networks, macvlan on the management NIC and network creation;
   a declared change moving a network; a removed network staying while used;
   networkd reload; reboot).
+
+### ADR-0020: The agent's local API
+
+- **Status:** Accepted (M2 slice 4a).
+- **Context:** M2's acceptance is managing VMs through the CLI. The
+  management API (M5) does not exist yet, and privileged operations must
+  pass through the agent (CLAUDE.md §11, §17).
+- **Decision:**
+  - The agent serves versioned HTTP+JSON on a Unix socket,
+    `/run/strata/agent.sock`, with paths shaped like the planned API
+    (`/api/v1/vms`, `/api/v1/vms/{name}/{start,stop,restart}`,
+    `/api/v1/operations/{id}`), so the M5 API server can take its place.
+  - **systemd owns the socket** (`strata-agent.socket`: root,
+    group `strata-operators`, mode 0660) and passes it to the agent, which
+    gains no privilege. The admin account is in `strata-operators`.
+  - **Authorization:** the agent reads the caller's uid (`SO_PEERCRED`) and
+    allows root and members of `strata-operators` only, independently of
+    the socket's permissions.
+  - **Audit:** every request, including refusals, is logged with the
+    caller's uid, method, path, status and operation ID (JSON, journal).
+  - **Operations:** changes return `202` with an operation (ID, type,
+    resource, status `PENDING` → `APPLYING` → `SUCCEEDED`/`FAILED`, caller
+    uid). One operation per VM at a time; operations are kept in memory
+    (the last 1000) until M3/M5 persist them.
+  - Request bodies are limited to 64 KiB, requests and operations have
+    timeouts, and the server shuts down gracefully.
+- **Consequences:** VM management is local to the host and limited to
+  members of a group; the group is as trusted as the restricted Incus
+  project allows (no host access through it). Remote access, TLS, accounts
+  and roles come with M5.
+
+### ADR-0021: VM schema and lifecycle
+
+- **Status:** Accepted (M2 slice 4a; `update` and `delete` follow in 4b).
+- **Decision:**
+  - **Schema `vm.strata.dev/v1alpha1`** (JSON; ADR-0004): name, CPU,
+    memory, a local image alias or none, disks (the first is `root`; others
+    are data volumes `<vm>-<disk>`), NICs on guest networks, autostart and
+    cloud-init SSH keys. Unknown fields are rejected; everything is
+    validated before an operation starts. No backend keys appear in it.
+  - **The spec alone defines the VM:** the Incus instance has no profiles,
+    and the spec is stored on it (`user.strata.spec`); only instances marked
+    `user.strata.managed` are visible to Strata.
+  - **Verification:** after `create`, configuration and devices are read
+    back and compared with the spec; after an action, the status is
+    checked. Only then is the operation `SUCCEEDED`.
+  - **Data volumes** are created before the instance. On failure, the
+    volumes this request created are removed; an existing volume is never
+    reused or removed. Deleting VMs and their disks follows in 4b with
+    typed confirmation; data volumes are never deleted with a VM.
+  - **Images:** local images in the project only; remote image references
+    are refused by validation and by `restricted.images.servers`.
+- **Verified by:** `internal/workload`, `internal/incus`,
+  `internal/agent/api` and `internal/vmcli` unit tests, `module-eval`, and
+  the `nixos-vms` VM test (a NixOS guest created from a spec, booted,
+  reaching its network and its data disk; stop, restart, forced stop; an
+  empty VM; refusals; image downloads refused; audit; autostart after a
+  host reboot).

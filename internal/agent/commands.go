@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/letthemplay/Strata/internal/agent/api"
 	"github.com/letthemplay/Strata/internal/cli"
 	"github.com/letthemplay/Strata/internal/hardware"
 	"github.com/letthemplay/Strata/internal/incus"
@@ -26,6 +27,10 @@ const (
 	DefaultInterval = time.Minute
 	// DefaultIncusProject is the Incus project the agent works in.
 	DefaultIncusProject = "strata"
+	// DefaultAPIGroup may use the local API.
+	DefaultAPIGroup = "strata-operators"
+	// providerTimeout bounds one Incus request of a workload operation.
+	providerTimeout = 10 * time.Minute
 )
 
 // Names of the Incus identity files in the --incus-credentials directory
@@ -53,6 +58,7 @@ func Subcommands(root fs.FS, reload <-chan os.Signal) []cli.Subcommand {
 				incusAddress := fset.String("incus-address", "", "loopback HOST:PORT of the Incus API (empty: no workload backend)")
 				incusCreds := fset.String("incus-credentials", "", "directory with "+IncusClientCert+", "+IncusClientKey+" and "+IncusServerCert)
 				incusProject := fset.String("incus-project", DefaultIncusProject, "Incus project of the agent")
+				apiGroup := fset.String("api-group", DefaultAPIGroup, "group whose members may use the local API")
 				if err := fset.Parse(args); err != nil {
 					if errors.Is(err, flag.ErrHelp) {
 						return cli.ExitOK
@@ -68,23 +74,41 @@ func Subcommands(root fs.FS, reload <-chan os.Signal) []cli.Subcommand {
 					return cli.ExitUsage
 				}
 				var backend BackendCheck
+				logger := slog.New(slog.NewJSONHandler(stderr, nil))
+				server := &api.Server{Authorize: api.GroupAuthorizer(*apiGroup), Log: logger}
 				if *incusAddress != "" {
-					backend = IncusBackend(incus.Config{
+					cfg := incus.Config{
 						Address:        *incusAddress,
 						Project:        *incusProject,
 						CertFile:       filepath.Join(*incusCreds, IncusClientCert),
 						KeyFile:        filepath.Join(*incusCreds, IncusClientKey),
 						ServerCertFile: filepath.Join(*incusCreds, IncusServerCert),
-					})
+					}
+					backend = IncusBackend(cfg)
+					// Creating a VM from an image can take minutes.
+					cfg.Timeout = providerTimeout
+					server.Provider = func() (api.VMs, func(), error) {
+						c, err := incus.New(cfg)
+						if err != nil {
+							return nil, nil, fmt.Errorf("workload backend: %w", err)
+						}
+						return c, c.Close, nil
+					}
 				}
-				logger := slog.New(slog.NewJSONHandler(stderr, nil))
-				err := Run(ctx, Options{
-					StateDir: *stateDir,
-					Root:     root,
-					Reload:   reload,
-					Interval: *interval,
-					Logger:   logger,
-					Backend:  backend,
+				listener, err := SystemdListener()
+				if err != nil {
+					logger.ErrorContext(ctx, "agent failed", "error", err)
+					return cli.ExitError
+				}
+				err = Run(ctx, Options{
+					StateDir:    *stateDir,
+					Root:        root,
+					Reload:      reload,
+					Interval:    *interval,
+					Logger:      logger,
+					Backend:     backend,
+					API:         server,
+					APIListener: listener,
 				})
 				if err != nil {
 					logger.ErrorContext(ctx, "agent failed", "error", err)

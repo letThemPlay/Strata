@@ -76,7 +76,11 @@ in
 
     users.users.${acfg.admin.name} = {
       isNormalUser = true;
-      extraGroups = [ "wheel" ];
+      # strata-operators may use the agent's local API (strata vm ...).
+      extraGroups = [
+        "wheel"
+      ]
+      ++ lib.optional (cfg.agent.enable && cfg.compute.enable) "strata-operators";
       openssh.authorizedKeys.keys = acfg.admin.authorizedKeys;
     }
     // (

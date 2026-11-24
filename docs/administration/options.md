@@ -74,7 +74,7 @@ Every `strata.<module>.enable` below requires `strata.enable`.
 
 | Option | Type | Default | Description |
 |---|---|---|---|
-| `strata.agent.enable` | bool | `false` | Run `strata-agent.service` (hardware discovery; on a compute host also the workload backend status). Unprivileged; no network access, except loopback to the Incus API on a compute host. |
+| `strata.agent.enable` | bool | `false` | Run `strata-agent.service` (hardware discovery; on a compute host also the workload backend status and the local API for `strata vm`, on `/run/strata/agent.sock` for members of `strata-operators`). Unprivileged; no network access, except loopback to the Incus API on a compute host. |
 
 ## Compute
 
@@ -255,6 +255,7 @@ evaluation. systemd-boot keeps at most 10 generations
 - `checks.<system>.nixos-host`: three-node VM test of a full host (SSH, sudo, firewall isolation, node exporter, Incus, KVM).
 - `checks.<system>.nixos-incus`: VM test of Incus and the agent's restricted identity (allowed and refused operations, loopback-only API, configuration enforcement).
 - `checks.<system>.nixos-storage`: VM test of storage pools (ZFS mirror, LVM-thin, dir; refusals; adoption; removal; LVM autoactivation; reboot).
+- `checks.<system>.nixos-vms`: VM test of VM lifecycle through the CLI (needs nested virtualization; boots a NixOS guest).
 - `checks.<system>.nixos-networks`: VM test of guest networks (untagged, VLAN and isolated networks; no host address; no VLAN hopping; access refusals; changes; reboot).
 - `checks.<system>.reference-host`: builds the reference host (the `host` template plus test values).
 - `checks.x86_64-linux.nixos-install-ext4`: formats an empty disk with the `ext4` layout, installs the reference host and boots it under UEFI.

@@ -11,5 +11,6 @@
     ./disk
     ./storage
     ./workloads
+    ./gitops
   ];
 }

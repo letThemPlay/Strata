@@ -240,6 +240,23 @@ yet). Their IR is `config.strata.ir`. See [workloads](workloads.md).
 Sizes are a number followed by `B`, `KiB`, `MiB`, `GiB` or `TiB`. The checks
 at evaluation are listed in the [workloads guide](workloads.md#what-is-checked).
 
+## GitOps
+
+The Strata controller: plans from a Git repository (M3; experimental; plans
+are not applied yet). See [configuration from Git](gitops.md).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.gitops.enable` | bool | `false` | Run the controller. Requires `strata.agent` and `strata.compute`. |
+| `strata.gitops.repository` | `https://...` or `ssh://...` | required | The host's configuration repository (read only). |
+| `strata.gitops.branch` | branch name | `"main"` | Branch to track. |
+| `strata.gitops.sshKeyFile` | null or path | `null` | Deploy key for `ssh://`; outside the Nix store (`LoadCredential`). |
+| `strata.gitops.knownHosts` | list of known_hosts lines | `[ ]` | The server's host key; required for `ssh://`. |
+| `strata.gitops.httpsTokenFile` | null or path | `null` | Access token for `https://`; outside the Nix store. |
+| `strata.gitops.trustedSigners` | list of `"TYPE KEY [NAME]"` | required | SSH public keys whose signatures make a commit trusted; at least one. |
+| `strata.gitops.interval` | 10–86400 | `300` | Seconds between synchronizations. |
+| `strata.gitops.evalTimeout` | 10–3600 | `300` | Seconds one evaluation may take. |
+
 ## Disk
 
 | Option | Type | Default | Description |

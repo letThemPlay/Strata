@@ -1,6 +1,7 @@
-// Package controller is the Strata control plane: Git synchronization,
-// Nix evaluation, planning and reconciliation (M3). It currently provides
-// IR validation.
+// Package controller is the Strata control plane (M3): it synchronizes the
+// configuration repository, evaluates the IR of verified commits and plans
+// them against the node through the agent (ADR-0025). It also validates IR
+// documents (`validate-ir`).
 package controller
 
 import (
@@ -17,7 +18,7 @@ import (
 // Subcommands returns the controller's subcommands. stdin is read by
 // `validate-ir -`.
 func Subcommands(stdin io.Reader) []cli.Subcommand {
-	return []cli.Subcommand{{
+	return []cli.Subcommand{runCommand(), evalCommand(stdin, os.Stdout), {
 		Name:    "validate-ir",
 		Usage:   "FILE|-",
 		Summary: "Validate an IR document (nix eval --json .#nixosConfigurations.NODE.config.strata.ir)",

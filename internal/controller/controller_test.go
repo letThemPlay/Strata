@@ -5,12 +5,15 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -29,10 +32,14 @@ type fakeRepo struct {
 
 func (r *fakeRepo) Fetch(context.Context) (string, error) { return r.head, r.fetchErr }
 
-func (r *fakeRepo) Verify(_ context.Context, sha, _ string) (string, error) {
+func (r *fakeRepo) Verify(_ context.Context, sha, lastApplied string) (string, error) {
 	r.verified = append(r.verified, sha)
 	if r.untrusted[sha] {
 		return "", gitops.ErrUntrusted
+	}
+	// c1 < c2 < c3 in history.
+	if lastApplied != "" && sha < lastApplied {
+		return "", gitops.ErrRewound
 	}
 	return "alice", nil
 }
@@ -40,6 +47,15 @@ func (r *fakeRepo) Verify(_ context.Context, sha, _ string) (string, error) {
 func (r *fakeRepo) FileID(_ context.Context, sha, _ string) (string, error) { return r.locks[sha], nil }
 
 func (r *fakeRepo) FlakeURL(sha string) string { return "git+file:///repo?rev=" + sha }
+
+func (r *fakeRepo) Resolve(_ context.Context, ref string) (string, error) {
+	for _, c := range []string{c1, c2, c3} {
+		if strings.HasPrefix(c, ref) {
+			return c, nil
+		}
+	}
+	return "", errors.New("commit not in the fetched history")
+}
 
 // fakeEval returns the IR the test sets per commit.
 type fakeEval struct {
@@ -57,14 +73,82 @@ func (e *fakeEval) IR(_ context.Context, url, node string) ([]byte, error) {
 	return e.irs[sha], nil
 }
 
+// fakeNode is the node as the agent shows it to the controller: it
+// observes and applies (reconciler.Provider), in memory.
 type fakeNode struct {
-	vms []workload.VMStatus
-	err error
+	mu    sync.Mutex
+	vms   []workload.VMStatus
+	err   error
+	calls []string
 }
 
-func (n *fakeNode) ListVMs(context.Context) ([]workload.VMStatus, error) { return n.vms, n.err }
+func (n *fakeNode) ListVMs(context.Context) ([]workload.VMStatus, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return slices.Clone(n.vms), n.err
+}
+
 func (n *fakeNode) Host(context.Context) (workload.Host, error) {
 	return workload.Host{Pools: []string{"bulk", "fast"}, Networks: []string{"dmz", "lan"}, Volumes: []string{}}, n.err
+}
+
+func (n *fakeNode) find(name string) int {
+	return slices.IndexFunc(n.vms, func(v workload.VMStatus) bool { return v.Spec.Name == name })
+}
+
+func (n *fakeNode) CreateVM(_ context.Context, vm workload.VM, meta workload.Meta) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, "create "+vm.Name)
+	n.vms = append(n.vms, workload.VMStatus{Spec: vm, Meta: meta, Status: "Stopped"})
+	return nil
+}
+
+func (n *fakeNode) VMAction(_ context.Context, name, action string, _ bool, _ int) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, action+" "+name)
+	if i := n.find(name); i >= 0 && action == workload.ActionStart {
+		n.vms[i].Status = "Running"
+	}
+	return nil
+}
+
+func (n *fakeNode) UpdateVM(_ context.Context, vm workload.VM, planID string, _ int) (workload.Plan, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, "update "+vm.Name)
+	i := n.find(vm.Name)
+	plan, err := workload.PlanVM(n.vms[i].Spec, vm, n.vms[i].Status == "Running")
+	if err != nil || plan.ID != planID {
+		return plan, errors.Join(err, workload.ErrConflict)
+	}
+	n.vms[i].Spec = vm
+	return plan, nil
+}
+
+func (n *fakeNode) RestoreVM(_ context.Context, name string, _ int) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, "restore "+name)
+	n.vms[n.find(name)].Drift = nil
+	return nil
+}
+
+func (n *fakeNode) SetMeta(_ context.Context, name string, meta workload.Meta) error {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, fmt.Sprintf("meta %s %s %v", name, meta.Owner, meta.Protected))
+	n.vms[n.find(name)].Meta = meta
+	return nil
+}
+
+func (n *fakeNode) DeleteVM(_ context.Context, name string, _ bool, _ int) ([]string, error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.calls = append(n.calls, "delete "+name)
+	n.vms = slices.Delete(n.vms, n.find(name), n.find(name)+1)
+	return nil, nil
 }
 
 func golden(t *testing.T) []byte {
@@ -79,16 +163,17 @@ func golden(t *testing.T) []byte {
 const (
 	c1 = "1111111111111111111111111111111111111111"
 	c2 = "2222222222222222222222222222222222222222"
+	c3 = "3333333333333333333333333333333333333333"
 )
 
 func newController(t *testing.T) (*Controller, *fakeRepo, *fakeEval, *fakeNode) {
 	t.Helper()
-	repo := &fakeRepo{head: c1, untrusted: map[string]bool{}, locks: map[string]string{c1: "lock1", c2: "lock1"}}
-	ev := &fakeEval{irs: map[string][]byte{c1: golden(t), c2: golden(t)}, err: map[string]error{}}
+	repo := &fakeRepo{head: c1, untrusted: map[string]bool{}, locks: map[string]string{c1: "lock1", c2: "lock1", c3: "lock1"}}
+	ev := &fakeEval{irs: map[string][]byte{c1: golden(t), c2: golden(t), c3: golden(t)}, err: map[string]error{}}
 	node := &fakeNode{}
 	c := &Controller{
 		Config: Config{Node: "hv-01", Repository: "ssh://git@h/x.git", Branch: "main", IntervalSeconds: 60, AutoApply: "none", TrustedSigners: []string{"k"}, EvalTimeoutSeconds: 60},
-		Repo:   repo, Eval: ev, Node: node,
+		Repo:   repo, Eval: ev, Node: node, Exec: node, Store: &Store{Dir: t.TempDir()}, Version: "test",
 		Now: func() time.Time { return time.Date(2026, 11, 25, 12, 0, 0, 0, time.UTC) },
 	}
 	return c, repo, ev, node

@@ -1,10 +1,10 @@
 # Declared workloads
 
-**Status: experimental, M3 slice 1.** VMs can be declared in the host
+**Status: experimental, M3.** VMs can be declared in the host
 configuration and Strata produces their intermediate representation (IR).
-Nothing applies them yet: the controller ([configuration from Git](gitops.md))
-fetches the configuration, verifies and evaluates it and shows the plan;
-applying it arrives in M3 slice 3b. Until then, manage VMs with `strata vm`
+The controller ([configuration from Git](gitops.md)) fetches the
+configuration, verifies and evaluates it, shows the plan and applies it
+once approved. VMs that are not declared are managed with `strata vm`
 ([VMs](vms.md)).
 
 ## Declaring VMs
@@ -40,9 +40,9 @@ is a complete example.
 
 `lifecycle.protected` will make Strata refuse to delete or restart the VM,
 even after it is removed from the configuration, until the flag is set to
-false and applied (M3 slice 3).
+false and applied.
 
-## How declarations will be applied
+## How declarations are applied
 
 The planner (M3 slice 2, [ADR-0024](../../ARCHITECTURE.md#adr-0024-planning-and-reconciliation))
 compares the IR with the host and makes one plan for the node: VMs to
@@ -50,13 +50,13 @@ compares the IR with the host and makes one plan for the node: VMs to
 directly), whose **protection** changes, and VMs managed through Git that
 are no longer declared, to **delete** (root disk only; data volumes are
 kept). What cannot be applied is listed with the reason: a VM of that name
-created with `strata vm` (adopt it, slice 3), a pool or network the host
+created with `strata vm` (adopt it: `strata config adopt`), a pool or network the host
 does not have yet (run `nixos-rebuild` first), a kept data volume in the
 way, a refused change, the project limits (counting VMs created with
 `strata vm` too), or a protected VM that would be deleted or restarted.
 VMs created with `strata vm` that are not declared are never touched. The
-controller and `strata config`, which run this from Git with approval,
-come in slice 3.
+controller runs this from Git and applies a plan once it is approved
+(`strata config apply`); see [configuration from Git](gitops.md).
 
 The options are data: they do not change the system `nixos-rebuild` builds.
 They are checked whenever the configuration is evaluated, so **an invalid

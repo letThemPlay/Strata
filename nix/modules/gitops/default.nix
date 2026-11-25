@@ -2,8 +2,8 @@
 # host's configuration repository, verifies commit signatures, evaluates
 # the IR of `nixosConfigurations.<node>.config.strata.ir` offline (in a
 # separate service without network) and plans
-# it against the node through the agent. In M3 slice 3a it only plans;
-# applying arrives in slice 3b.
+# it against the node through the agent, and applies approved plans
+# (ADR-0026).
 {
   config,
   lib,
@@ -20,11 +20,16 @@ let
   knownHosts = pkgs.writeText "strata-gitops-known-hosts" (lib.concatLines g.knownHosts);
   settings = {
     node = cfg.node.id;
-    inherit (g) repository branch trustedSigners;
+    inherit (g)
+      repository
+      branch
+      trustedSigners
+      autoApply
+      ;
     intervalSeconds = g.interval;
-    autoApply = "none";
     evalTimeoutSeconds = g.evalTimeout;
   }
+  // lib.optionalAttrs (g.keepDeployments != null) { inherit (g) keepDeployments; }
   // lib.optionalAttrs isSSH {
     knownHostsFile = "${knownHosts}";
     sshKey = "gitops-ssh-key";
@@ -82,6 +87,29 @@ in
       type = types.ints.between 10 86400;
       default = 300;
       description = "Seconds between synchronizations (`strata config sync` synchronizes at once).";
+    };
+    autoApply = mkOption {
+      type = types.enum [
+        "none"
+        "safe"
+      ];
+      default = "none";
+      description = ''
+        "none": every plan waits for approval (`strata config apply`).
+        "safe": plans without restarts, deletions, restores and
+        unreconcilable items are applied without approval (recorded as
+        approved by "auto"); the others still wait.
+      '';
+    };
+    keepDeployments = mkOption {
+      type = types.nullOr types.ints.positive;
+      default = null;
+      example = 200;
+      description = ''
+        How many finished deployment records to keep (the oldest are
+        removed). null: keep every record. Plans awaiting approval and
+        deployments in progress are never removed.
+      '';
     };
     evalTimeout = mkOption {
       type = types.ints.between 10 3600;

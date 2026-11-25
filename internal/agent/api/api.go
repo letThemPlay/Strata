@@ -19,6 +19,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"os/user"
 	"strconv"
 	"sync"
 	"syscall"
@@ -46,6 +47,8 @@ type VMs interface {
 	UpdateVM(ctx context.Context, vm workload.VM, planID string, stopTimeout int) (workload.Plan, error)
 	DeleteVM(ctx context.Context, name string, stop bool, stopTimeout int) ([]string, error)
 	Host(ctx context.Context) (workload.Host, error)
+	RestoreVM(ctx context.Context, name string, stopTimeout int) error
+	SetMeta(ctx context.Context, name string, meta workload.Meta) error
 }
 
 // Server is the local API.
@@ -55,7 +58,11 @@ type Server struct {
 	Provider func() (VMs, func(), error)
 	// Authorize returns nil if the caller with uid may use the API.
 	Authorize func(uid uint32) error
-	Log       *slog.Logger
+	// IsController reports whether uid is the Strata controller, the only
+	// caller that may create and change VMs managed through Git (ADR-0026).
+	// nil: no controller on this node.
+	IsController func(uid uint32) bool
+	Log          *slog.Logger
 
 	mu  sync.Mutex
 	ops map[string]*Operation
@@ -152,6 +159,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("PUT /api/v1/vms/{name}", s.updateVM)
 	mux.HandleFunc("DELETE /api/v1/vms/{name}", s.deleteVM)
 	mux.HandleFunc("POST /api/v1/vms/{name}/{action}", s.vmAction)
+	mux.HandleFunc("POST /api/v1/vms/{name}/restore", s.restoreVM)
+	mux.HandleFunc("PUT /api/v1/vms/{name}/meta", s.setMeta)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.getOperation)
 	mux.HandleFunc("GET /api/v1/host", s.getHost)
 	return s.authorize(mux)
@@ -295,8 +304,21 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", err)
 		return
 	}
+	meta := workload.Meta{Owner: workload.OwnerCLI}
+	q := r.URL.Query()
+	switch {
+	case q.Get("owner") == workload.OwnerGitOps:
+		if !s.controller(r) {
+			writeError(w, http.StatusForbidden, "forbidden", errors.New("only the Strata controller may create VMs managed through Git"))
+			return
+		}
+		meta = workload.Meta{Owner: workload.OwnerGitOps, Protected: q.Get("protected") == "true"}
+	case q.Get("owner") != "" || q.Get("protected") != "":
+		writeError(w, http.StatusBadRequest, "invalid", errors.New("owner may only be gitops, and protected only with it"))
+		return
+	}
 	s.start(w, r, "create", vm.Name, func(ctx context.Context, p VMs) (any, error) {
-		return nil, p.CreateVM(ctx, vm, workload.Meta{Owner: workload.OwnerCLI})
+		return nil, p.CreateVM(ctx, vm, meta)
 	})
 }
 
@@ -328,7 +350,7 @@ func (s *Server) updateVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer release()
-		if err := notGitManaged(r.Context(), p, name); err != nil {
+		if err := notGitManaged(r.Context(), p, name, s.controller(r)); err != nil {
 			writeProviderError(w, err)
 			return
 		}
@@ -340,8 +362,9 @@ func (s *Server) updateVM(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, plan)
 	case q.Get("confirm") != "":
 		id := q.Get("confirm")
+		controller := s.controller(r)
 		s.start(w, r, "update", name, func(ctx context.Context, p VMs) (any, error) {
-			if err := notGitManaged(ctx, p, name); err != nil {
+			if err := notGitManaged(ctx, p, name, controller); err != nil {
 				return nil, err
 			}
 			plan, err := p.UpdateVM(ctx, vm, id, DefaultStopTimeout)
@@ -366,8 +389,9 @@ func (s *Server) deleteVM(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	stop := q.Get("stop") == "true"
+	controller := s.controller(r)
 	s.start(w, r, "delete", name, func(ctx context.Context, p VMs) (any, error) {
-		if err := notGitManaged(ctx, p, name); err != nil {
+		if err := notGitManaged(ctx, p, name, controller); err != nil {
 			return nil, err
 		}
 		kept, err := p.DeleteVM(ctx, name, stop, DefaultStopTimeout)
@@ -378,10 +402,13 @@ func (s *Server) deleteVM(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// notGitManaged refuses changes through this API to a VM that is
-// managed through Git (M3 decision 6): its spec comes from the
+// notGitManaged refuses changes to a VM that is managed through Git (M3
+// decision 6), except by the controller: its spec comes from the
 // configuration. Lifecycle actions (start, stop, restart) stay allowed.
-func notGitManaged(ctx context.Context, p VMs, name string) error {
+func notGitManaged(ctx context.Context, p VMs, name string, controller bool) error {
+	if controller {
+		return nil
+	}
 	st, err := p.GetVM(ctx, name)
 	if err != nil {
 		return err //nolint:wrapcheck // Provider errors name the VM.
@@ -545,4 +572,60 @@ func ConnContext(ctx context.Context, c net.Conn) context.Context { return withP
 func CallerUID(r *http.Request) (uint32, bool) {
 	p := peerOf(r)
 	return p.uid, p.ok
+}
+
+// controller reports whether the caller of r is the Strata controller.
+func (s *Server) controller(r *http.Request) bool {
+	uid, ok := CallerUID(r)
+	return ok && s.IsController != nil && s.IsController(uid)
+}
+
+// controllerOnly refuses r unless its caller is the controller.
+func (s *Server) controllerOnly(w http.ResponseWriter, r *http.Request) bool {
+	if s.controller(r) {
+		return true
+	}
+	writeError(w, http.StatusForbidden, "forbidden", errors.New("only the Strata controller may do this"))
+	return false
+}
+
+// restoreVM puts back what Strata last applied to a drifted VM
+// (controller only).
+func (s *Server) restoreVM(w http.ResponseWriter, r *http.Request) {
+	if !s.controllerOnly(w, r) {
+		return
+	}
+	name := r.PathValue("name")
+	s.start(w, r, "restore", name, func(ctx context.Context, p VMs) (any, error) {
+		return nil, p.RestoreVM(ctx, name, DefaultStopTimeout)
+	})
+}
+
+// setMeta changes a VM's owner and protection (controller only: adoption
+// and lifecycle changes).
+func (s *Server) setMeta(w http.ResponseWriter, r *http.Request) {
+	if !s.controllerOnly(w, r) {
+		return
+	}
+	var meta workload.Meta
+	dec := json.NewDecoder(io.LimitReader(r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&meta); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid", fmt.Errorf("meta: %w", err))
+		return
+	}
+	name := r.PathValue("name")
+	s.start(w, r, "meta", name, func(ctx context.Context, p VMs) (any, error) {
+		return nil, p.SetMeta(ctx, name, meta)
+	})
+}
+
+// UserMatcher returns a function reporting whether a uid is the user
+// named name (the controller's account). The name is looked up on each
+// call, so the user may be created after the agent starts.
+func UserMatcher(name string) func(uid uint32) bool {
+	return func(uid uint32) bool {
+		u, err := user.Lookup(name)
+		return err == nil && u.Uid == strconv.FormatUint(uint64(uid), 10)
+	}
 }

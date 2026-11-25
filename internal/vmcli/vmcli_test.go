@@ -304,3 +304,27 @@ func TestOwnerAndDrift(t *testing.T) {
 		t.Errorf("update: %d %q", code, errOut)
 	}
 }
+
+func (f *fakeVMs) RestoreVM(_ context.Context, name string, _ int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.vms[name]
+	if !ok {
+		return fmt.Errorf("vm %s: %w", name, workload.ErrNotFound)
+	}
+	st.Drift = nil
+	f.vms[name] = st
+	return nil
+}
+
+func (f *fakeVMs) SetMeta(_ context.Context, name string, meta workload.Meta) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.vms[name]
+	if !ok {
+		return fmt.Errorf("vm %s: %w", name, workload.ErrNotFound)
+	}
+	st.Meta = meta
+	f.vms[name] = st
+	return nil
+}

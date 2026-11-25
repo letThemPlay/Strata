@@ -297,3 +297,18 @@ func AllowedSigners(keys []string) (string, error) {
 	}
 	return b.String(), nil
 }
+
+var prefixPattern = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
+
+// Resolve returns the full ID of a commit in the fetched history, given
+// its ID or a prefix of at least 7 hex digits.
+func (r *Repo) Resolve(ctx context.Context, ref string) (string, error) {
+	if !prefixPattern.MatchString(ref) {
+		return "", fmt.Errorf("%q is not a commit ID", ref)
+	}
+	out, err := r.git(ctx, nil, "rev-parse", "--verify", "--quiet", ref+"^{commit}")
+	if err != nil {
+		return "", fmt.Errorf("commit %s is not in the fetched history (or the prefix is ambiguous)", ref)
+	}
+	return strings.TrimSpace(string(out)), nil
+}

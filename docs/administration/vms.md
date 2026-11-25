@@ -25,8 +25,9 @@ Remote management (TLS, accounts, roles) comes with the management API (M5).
 
 Every VM has an owner. VMs created with `strata vm` (and every VM from
 before M3) belong to the CLI (`cli`); VMs declared in the host
-configuration will belong to Git (`gitops`) once the controller applies
-them (M3, [workloads](workloads.md)). `strata vm list` shows the owner,
+configuration and created by the controller belong to Git (`gitops`)
+([workloads](workloads.md), [configuration from Git](gitops.md)); a CLI VM
+moves to Git with `strata config adopt`. `strata vm list` shows the owner,
 marked `protected` and `drift` where that applies; `strata vm show` shows
 the details:
 
@@ -45,7 +46,9 @@ Drift (changed outside Strata):
 - **Drift** is a difference between the VM in Incus and what Strata last
   applied, made with `incus` directly. `update` is refused for a drifted
   VM; for a VM managed through Git, the controller's plan restores it
-  (with approval).
+  (with approval). Only the controller may create VMs as Git, restore
+  them, or change a VM's owner: the agent recognises it by its system
+  user (`strata-controller`).
 - **Protected** VMs (`lifecycle.protected` in the declaration) are never
   deleted or restarted by the controller.
 

@@ -19,6 +19,7 @@ let
     + " --incus-project ${cfg.compute.incus.project}"
     + " --incus-credentials %d"
     + " --api-group strata-operators"
+    + lib.optionalString cfg.gitops.enable " --controller-user strata-controller"
   );
 in
 {

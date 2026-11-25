@@ -18,6 +18,7 @@ import (
 	"github.com/letthemplay/Strata/internal/agent/client"
 	"github.com/letthemplay/Strata/internal/cli"
 	"github.com/letthemplay/Strata/internal/gitops"
+	"github.com/letthemplay/Strata/internal/version"
 )
 
 // runCommand is `strata-controller run`, the service.
@@ -81,14 +82,21 @@ func serve(ctx context.Context, logger *slog.Logger, configFile, stateDir, creds
 	if err := repo.Check(); err != nil {
 		return err //nolint:wrapcheck // The message names the setting.
 	}
+	agentClient := &client.Client{Socket: agentSocket}
 	c := &Controller{
 		Config: cfg, Repo: repo, Log: logger,
-		Eval: &RemoteEvaluator{Socket: evalSocket, Timeout: time.Duration(cfg.EvalTimeoutSeconds) * time.Second},
-		Node: &client.Client{Socket: agentSocket},
+		Eval:    &RemoteEvaluator{Socket: evalSocket, Timeout: time.Duration(cfg.EvalTimeoutSeconds) * time.Second},
+		Node:    agentClient,
+		Exec:    client.Provider{Client: agentClient},
+		Store:   &Store{Dir: stateDir},
+		Version: version.Get().Version,
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	if err := c.Init(ctx); err != nil {
+		return err
+	}
 	listener, err := agent.SystemdListener()
 	if err != nil {
 		return err //nolint:wrapcheck // Names the socket.

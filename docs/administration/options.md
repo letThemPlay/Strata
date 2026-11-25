@@ -242,8 +242,8 @@ at evaluation are listed in the [workloads guide](workloads.md#what-is-checked).
 
 ## GitOps
 
-The Strata controller: plans from a Git repository (M3; experimental; plans
-are not applied yet). See [configuration from Git](gitops.md).
+The Strata controller: plans from a Git repository and applies approved
+plans (M3; experimental). See [configuration from Git](gitops.md).
 
 | Option | Type | Default | Description |
 |---|---|---|---|
@@ -256,6 +256,8 @@ are not applied yet). See [configuration from Git](gitops.md).
 | `strata.gitops.trustedSigners` | list of `"TYPE KEY [NAME]"` | required | SSH public keys whose signatures make a commit trusted; at least one. |
 | `strata.gitops.interval` | 10–86400 | `300` | Seconds between synchronizations. |
 | `strata.gitops.evalTimeout` | 10–3600 | `300` | Seconds one evaluation may take. |
+| `strata.gitops.autoApply` | `"none"` or `"safe"` | `"none"` | `"safe"`: apply plans without approval when they restart, delete or restore nothing and have no item that cannot be applied. Others still wait for approval. |
+| `strata.gitops.keepDeployments` | null or positive integer | `null` | Keep only this many finished deployment records (the newest); `null` keeps all. Records awaiting approval or in progress are never removed. |
 
 ## Disk
 

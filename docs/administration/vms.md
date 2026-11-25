@@ -15,11 +15,43 @@ with the caller's uid (`journalctl -u strata-agent | grep '"msg":"audit"'`).
 
 ```console
 $ strata vm list
-NAME    STATUS   CPU  MEMORY  ADDRESSES
-web-01  Running  2    4GiB    192.0.2.60
+NAME    STATUS   OWNER  CPU  MEMORY  ADDRESSES
+web-01  Running  cli    2    4GiB    192.0.2.60
 ```
 
 Remote management (TLS, accounts, roles) comes with the management API (M5).
+
+## Owner, protection and drift
+
+Every VM has an owner. VMs created with `strata vm` (and every VM from
+before M3) belong to the CLI (`cli`); VMs declared in the host
+configuration will belong to Git (`gitops`) once the controller applies
+them (M3, [workloads](workloads.md)). `strata vm list` shows the owner,
+marked `protected` and `drift` where that applies; `strata vm show` shows
+the details:
+
+```console
+$ strata vm show db-01
+...
+Owner:     gitops
+Protected: true
+Drift (changed outside Strata):
+  config limits.cpu: "8", want "4"
+```
+
+- **`strata vm update` and `delete` are refused for VMs managed through
+  Git** (`managed by Git: change its declaration in the configuration
+  repository instead`). `start`, `stop` and `restart` are allowed.
+- **Drift** is a difference between the VM in Incus and what Strata last
+  applied, made with `incus` directly. `update` is refused for a drifted
+  VM; for a VM managed through Git, the controller's plan restores it
+  (with approval).
+- **Protected** VMs (`lifecycle.protected` in the declaration) are never
+  deleted or restarted by the controller.
+
+The agent also reports what the Strata project can use on the host
+(`GET /api/v1/host` on the socket: pools, networks, data volumes); the
+controller plans against it.
 
 ## The VM spec
 
@@ -179,7 +211,8 @@ you no longer need with `sudo incus storage volume delete POOL NAME --project st
 | `Storage pool "X" ... not found` / `Network not allowed in project` | The pool or network is not declared in the host configuration. |
 | `verification failed: ...` | Incus did not end up as the spec says; the message lists the differences. |
 | `plan again` | The VM changed since the plan was shown; run `update` again. |
-| `it was changed outside Strata` | The VM's configuration in Incus differs from its spec (changed with `incus` directly). Revert that change. |
+| `it was changed outside Strata` | The VM's configuration in Incus differs from its spec (changed with `incus` directly; `strata vm show` lists the drift). Revert that change. |
+| `managed by Git` | The VM is declared in the host configuration and managed by the controller: change its declaration instead. |
 | `change refused: ...` | The change would lose data or cannot be applied (see Changing a VM). |
 | `delete`: `it is Running` | Stop the VM first, or add `--stop`. |
 | `stop`: `Failed shutting down instance, status is "Running"` | The guest did not shut down in time. A graceful stop is an ACPI power-button press: the guest must handle it, and systemd-based guests ignore it until boot has finished and for 30 s after startup (`HoldoffTimeoutSec`). Wait and retry, raise `--timeout`, or use `--force`. |

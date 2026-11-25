@@ -40,11 +40,12 @@ const (
 type VMs interface {
 	ListVMs(ctx context.Context) ([]workload.VMStatus, error)
 	GetVM(ctx context.Context, name string) (workload.VMStatus, error)
-	CreateVM(ctx context.Context, vm workload.VM) error
+	CreateVM(ctx context.Context, vm workload.VM, meta workload.Meta) error
 	VMAction(ctx context.Context, name, action string, force bool, timeoutSeconds int) error
 	PlanVM(ctx context.Context, vm workload.VM) (workload.Plan, error)
 	UpdateVM(ctx context.Context, vm workload.VM, planID string, stopTimeout int) (workload.Plan, error)
 	DeleteVM(ctx context.Context, name string, stop bool, stopTimeout int) ([]string, error)
+	Host(ctx context.Context) (workload.Host, error)
 }
 
 // Server is the local API.
@@ -152,6 +153,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/vms/{name}", s.deleteVM)
 	mux.HandleFunc("POST /api/v1/vms/{name}/{action}", s.vmAction)
 	mux.HandleFunc("GET /api/v1/operations/{id}", s.getOperation)
+	mux.HandleFunc("GET /api/v1/host", s.getHost)
 	return s.authorize(mux)
 }
 
@@ -235,6 +237,8 @@ func writeProviderError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusNotFound, "not_found", err)
 	case errors.Is(err, workload.ErrExists):
 		writeError(w, http.StatusConflict, "exists", err)
+	case errors.Is(err, workload.ErrGitManaged):
+		writeError(w, http.StatusConflict, "git_managed", err)
 	case errors.Is(err, workload.ErrConflict):
 		writeError(w, http.StatusConflict, "conflict", err)
 	case errors.Is(err, workload.ErrRefused):
@@ -291,7 +295,9 @@ func (s *Server) createVM(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid", err)
 		return
 	}
-	s.start(w, r, "create", vm.Name, func(ctx context.Context, p VMs) (any, error) { return nil, p.CreateVM(ctx, vm) })
+	s.start(w, r, "create", vm.Name, func(ctx context.Context, p VMs) (any, error) {
+		return nil, p.CreateVM(ctx, vm, workload.Meta{Owner: workload.OwnerCLI})
+	})
 }
 
 // KeptVolumes is the result of a delete operation.
@@ -322,6 +328,10 @@ func (s *Server) updateVM(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		defer release()
+		if err := notGitManaged(r.Context(), p, name); err != nil {
+			writeProviderError(w, err)
+			return
+		}
 		plan, err := p.PlanVM(r.Context(), vm)
 		if err != nil {
 			writeProviderError(w, err)
@@ -331,6 +341,9 @@ func (s *Server) updateVM(w http.ResponseWriter, r *http.Request) {
 	case q.Get("confirm") != "":
 		id := q.Get("confirm")
 		s.start(w, r, "update", name, func(ctx context.Context, p VMs) (any, error) {
+			if err := notGitManaged(ctx, p, name); err != nil {
+				return nil, err
+			}
 			plan, err := p.UpdateVM(ctx, vm, id, DefaultStopTimeout)
 			if err != nil {
 				return nil, err //nolint:wrapcheck // Provider errors name the VM and step.
@@ -354,12 +367,44 @@ func (s *Server) deleteVM(w http.ResponseWriter, r *http.Request) {
 	}
 	stop := q.Get("stop") == "true"
 	s.start(w, r, "delete", name, func(ctx context.Context, p VMs) (any, error) {
+		if err := notGitManaged(ctx, p, name); err != nil {
+			return nil, err
+		}
 		kept, err := p.DeleteVM(ctx, name, stop, DefaultStopTimeout)
 		if err != nil {
 			return nil, err //nolint:wrapcheck // Provider errors name the VM and step.
 		}
 		return KeptVolumes{KeptVolumes: kept}, nil
 	})
+}
+
+// notGitManaged refuses changes through this API to a VM that is
+// managed through Git (M3 decision 6): its spec comes from the
+// configuration. Lifecycle actions (start, stop, restart) stay allowed.
+func notGitManaged(ctx context.Context, p VMs, name string) error {
+	st, err := p.GetVM(ctx, name)
+	if err != nil {
+		return err //nolint:wrapcheck // Provider errors name the VM.
+	}
+	if st.Owner == workload.OwnerGitOps {
+		return fmt.Errorf("vm %s: %w: change its declaration in the configuration repository instead", name, workload.ErrGitManaged)
+	}
+	return nil
+}
+
+// getHost returns what the workload project can use on the node.
+func (s *Server) getHost(w http.ResponseWriter, r *http.Request) {
+	p, release, ok := s.provider(w)
+	if !ok {
+		return
+	}
+	defer release()
+	h, err := p.Host(r.Context())
+	if err != nil {
+		writeProviderError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h)
 }
 
 func (s *Server) vmAction(w http.ResponseWriter, r *http.Request) {

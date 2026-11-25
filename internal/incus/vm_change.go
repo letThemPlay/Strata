@@ -17,36 +17,37 @@ import (
 func isManagedKey(k string) bool {
 	switch k {
 	case "limits.cpu", "limits.memory", "boot.autostart", "security.nesting",
-		"cloud-init.user-data", keyManaged, keySpec:
+		"cloud-init.user-data", keyManaged, keySpec, keyOwner, keyProtected:
 		return true
 	}
 	return false
 }
 
-// managed returns a VM's instance and its applied spec, refusing a VM
-// that was changed outside Strata: a plan must compare against what
-// Incus actually has.
-func (c *Client) managed(ctx context.Context, name string) (instance, workload.VM, error) {
+// managed returns a VM's instance and its recorded status, refusing a VM
+// that was changed outside Strata (drift): a plan must compare against
+// what Incus actually has. RestoreVM repairs drift.
+func (c *Client) managed(ctx context.Context, name string) (instance, workload.VMStatus, error) {
 	inst, err := c.getInstance(ctx, name)
 	if err != nil {
-		return instance{}, workload.VM{}, err
+		return instance{}, workload.VMStatus{}, err
 	}
 	st, err := status(inst)
 	if err != nil {
-		return instance{}, workload.VM{}, err
+		return instance{}, workload.VMStatus{}, err
 	}
-	if err := verify(st.Spec, inst); err != nil {
-		return instance{}, workload.VM{}, fmt.Errorf("vm %s: %w: it was changed outside Strata (%w)", name, workload.ErrConflict, err)
+	if len(st.Drift) > 0 {
+		return instance{}, workload.VMStatus{}, fmt.Errorf("vm %s: %w: it was changed outside Strata (%s)", name, workload.ErrConflict, strings.Join(st.Drift, "; "))
 	}
-	return inst, st.Spec, nil
+	return inst, st, nil
 }
 
 // PlanVM returns the plan that turns the VM into desired.
 func (c *Client) PlanVM(ctx context.Context, desired workload.VM) (workload.Plan, error) {
-	inst, current, err := c.managed(ctx, desired.Name)
+	inst, st, err := c.managed(ctx, desired.Name)
 	if err != nil {
 		return workload.Plan{}, err
 	}
+	current := st.Spec
 	plan, err := workload.PlanVM(current, desired, inst.Status == "Running")
 	if err != nil {
 		return workload.Plan{}, fmt.Errorf("vm %s: %w", desired.Name, err)
@@ -60,10 +61,11 @@ func (c *Client) PlanVM(ctx context.Context, desired workload.VM) (workload.Plan
 // started again when the plan needs it (ADR-0021). On failure after the
 // stop, new volumes are removed and the VM is started again unchanged.
 func (c *Client) UpdateVM(ctx context.Context, desired workload.VM, planID string, stopTimeout int) (workload.Plan, error) {
-	inst, current, err := c.managed(ctx, desired.Name)
+	inst, st, err := c.managed(ctx, desired.Name)
 	if err != nil {
 		return workload.Plan{}, err
 	}
+	current, meta := st.Spec, st.Meta
 	plan, err := workload.PlanVM(current, desired, inst.Status == "Running")
 	if err != nil {
 		return workload.Plan{}, fmt.Errorf("vm %s: %w", desired.Name, err)
@@ -105,7 +107,7 @@ func (c *Client) UpdateVM(ctx context.Context, desired workload.VM, planID strin
 		return workload.Plan{}, restore(errors.Join(err, c.removeNewVolumes(context.WithoutCancel(ctx), desired, created)))
 	}
 
-	if err := c.putInstance(ctx, desired); err != nil {
+	if err := c.putInstance(ctx, desired, meta); err != nil {
 		cleanup := c.removeNewVolumes(context.WithoutCancel(ctx), desired, created)
 		return workload.Plan{}, restore(errors.Join(fmt.Errorf("vm %s: apply: %w", name, err), cleanup))
 	}
@@ -118,16 +120,17 @@ func (c *Client) UpdateVM(ctx context.Context, desired workload.VM, planID strin
 	if err != nil {
 		return workload.Plan{}, err
 	}
-	return plan, verify(desired, inst)
+	return plan, verify(desired, meta, inst)
 }
 
-// putInstance replaces the spec-determined configuration and all devices.
-func (c *Client) putInstance(ctx context.Context, vm workload.VM) error {
+// putInstance replaces the spec- and meta-determined configuration and
+// all devices.
+func (c *Client) putInstance(ctx context.Context, vm workload.VM, meta workload.Meta) error {
 	var raw map[string]any
 	if err := c.Do(ctx, http.MethodGet, instancePath(vm.Name), nil, &raw); err != nil {
 		return err
 	}
-	cfg, devices, err := instanceFor(vm)
+	cfg, devices, err := instanceFor(vm, meta)
 	if err != nil {
 		return err
 	}

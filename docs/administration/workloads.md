@@ -41,6 +41,22 @@ is a complete example.
 even after it is removed from the configuration, until the flag is set to
 false and applied (M3 slice 3).
 
+## How declarations will be applied
+
+The planner (M3 slice 2, [ADR-0024](../../ARCHITECTURE.md#adr-0024-planning-and-reconciliation))
+compares the IR with the host and makes one plan for the node: VMs to
+**create** (then started), **update**, **restore** (changed with `incus`
+directly), whose **protection** changes, and VMs managed through Git that
+are no longer declared, to **delete** (root disk only; data volumes are
+kept). What cannot be applied is listed with the reason: a VM of that name
+created with `strata vm` (adopt it, slice 3), a pool or network the host
+does not have yet (run `nixos-rebuild` first), a kept data volume in the
+way, a refused change, the project limits (counting VMs created with
+`strata vm` too), or a protected VM that would be deleted or restarted.
+VMs created with `strata vm` that are not declared are never touched. The
+controller and `strata config`, which run this from Git with approval,
+come in slice 3.
+
 The options are data: they do not change the system `nixos-rebuild` builds.
 They are checked whenever the configuration is evaluated, so **an invalid
 workload also fails `nixos-rebuild`**, as for any other assertion.

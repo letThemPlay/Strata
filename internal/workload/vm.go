@@ -236,13 +236,40 @@ func ParseSize(s string) (uint64, error) {
 	return n * mult, nil
 }
 
+// Owners of a VM: who may change it (M3 decision 6).
+const (
+	// OwnerCLI: created with `strata vm` (and every VM from before M3).
+	OwnerCLI = "cli"
+	// OwnerGitOps: declared in Git and managed by the controller.
+	OwnerGitOps = "gitops"
+)
+
+// Meta is what Strata records about a VM besides its spec.
+type Meta struct {
+	Owner string `json:"owner"`
+	// Protected VMs are never deleted or restarted by the controller.
+	Protected bool `json:"protected"`
+}
+
+// Host lists what the workload project can use on the node.
+type Host struct {
+	Pools    []string `json:"pools"`
+	Networks []string `json:"networks"`
+	// Volumes are the custom (data) volumes, as "pool/name".
+	Volumes []string `json:"volumes"`
+}
+
 // VMStatus is a VM as observed in the backend.
 type VMStatus struct {
 	Spec VM `json:"spec"`
+	Meta
 	// Status is the backend's status, e.g. "Running", "Stopped".
 	Status string `json:"status"`
 	// Addresses are the guest's global IP addresses, if known.
 	Addresses []string `json:"addresses,omitempty"`
+	// Drift lists how the VM differs from its recorded spec and meta
+	// (changed outside Strata); empty when in sync.
+	Drift []string `json:"drift,omitempty"`
 }
 
 // Errors returned by workload providers.
@@ -265,6 +292,10 @@ const (
 // ErrConflict reports that a request conflicts with the workload's
 // current state (a stale plan, a running VM that must be stopped first).
 var ErrConflict = errors.New("conflict")
+
+// ErrGitManaged reports that a VM is managed through Git and cannot be
+// changed with `strata vm`.
+var ErrGitManaged = errors.New("managed by Git")
 
 // ErrRefused reports that a requested change is not supported (it would
 // lose data or cannot be applied).

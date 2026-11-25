@@ -10,5 +10,6 @@
     ./monitoring
     ./disk
     ./storage
+    ./workloads
   ];
 }

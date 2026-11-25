@@ -185,6 +185,76 @@ let
       }
     ]);
 
+  # ---- workloads ----
+  vmBase = {
+    resources = {
+      cpu = 2;
+      memory = "2GiB";
+    };
+    disks.root.size = "10GiB";
+  };
+  workloadsWith =
+    {
+      vms,
+      compute ? { },
+      defaultPool ? "fast",
+    }:
+    hostWith [
+      static
+      {
+        strata = {
+          storage = {
+            inherit defaultPool;
+            pools = {
+              fast = pool "zfs" { devices = [ disk1 ]; };
+              bulk = pool "lvm" { devices = [ disk2 ]; };
+            };
+          };
+          networking.guest.networks = {
+            lan.uplink = "eno2";
+            dmz = {
+              uplink = "eno3";
+              vlan = 20;
+            };
+          };
+          compute.incus = compute;
+          workloads.vms = vms;
+        };
+      }
+    ];
+  workloads = workloadsWith {
+    compute.imageServers = [ "images.linuxcontainers.org" ];
+    vms = {
+      web = vmBase // {
+        image = "debian/13/cloud";
+        imageServer = "images.linuxcontainers.org";
+        networks = {
+          eth1.network = "lan";
+          eth0.network = "dmz";
+        };
+        autostart = true;
+      };
+      db = vmBase // {
+        disks = {
+          root.size = "10GiB";
+          logs = {
+            size = "1GiB";
+            pool = "bulk";
+          };
+          data = {
+            size = "5GiB";
+            pool = "bulk";
+          };
+        };
+        lifecycle.protected = true;
+      };
+    };
+  };
+  wir = workloads.config.strata.ir;
+  wres = lib.listToAttrs (map (r: lib.nameValuePair r.id r) wir.resources);
+  workloadFails = msg: args: hasFailure msg (workloadsWith args);
+  oneVM = vm: { vms.vm1 = lib.recursiveUpdate vmBase vm; };
+
   cases = {
     # ---- full host ----
     "full static host has no failed assertions" = failedAssertions host == [ ];
@@ -248,6 +318,254 @@ let
     "compute does not hardcode vendor KVM modules" =
       !(lib.elem "kvm-intel" hc.boot.kernelModules) && !(lib.elem "kvm-amd" hc.boot.kernelModules);
     "compute requires strata.enable" = requiresEnable "compute" { };
+
+    # ---- workloads ----
+    "workloads: a valid declaration has no failed assertions" = failedAssertions workloads == [ ];
+    "workloads: IR header and host context" =
+      wir.apiVersion == "ir.strata.dev/v1alpha1"
+      && wir.node == "hv-01"
+      && wir.generator.strataVersion == workloads.config.strata.package.version
+      &&
+        wir.host == {
+          project = "strata";
+          defaultPool = "fast";
+          pools = [
+            {
+              name = "bulk";
+              driver = "lvm";
+            }
+            {
+              name = "fast";
+              driver = "zfs";
+            }
+          ];
+          networks = [
+            { name = "dmz"; }
+            { name = "lan"; }
+          ];
+          imageServers = [ "images.linuxcontainers.org" ];
+          limits = { };
+        };
+    "workloads: resources sorted by ID, with type, dependencies and lifecycle" =
+      map (r: r.id) wir.resources == [
+        "vm/db"
+        "vm/web"
+      ]
+      && wres."vm/db".type == "vm"
+      &&
+        wres."vm/db".dependsOn == [
+          "pool/bulk"
+          "pool/fast"
+        ]
+      &&
+        wres."vm/web".dependsOn == [
+          "network/dmz"
+          "network/lan"
+          "pool/fast"
+        ]
+      && wres."vm/db".lifecycle.protected
+      && !wres."vm/web".lifecycle.protected;
+    "workloads: spec is vm.strata.dev/v1alpha1 with root first, then disks and NICs by name" =
+      wres."vm/db".spec == {
+        apiVersion = "vm.strata.dev/v1alpha1";
+        name = "db";
+        resources = {
+          cpu = 2;
+          memory = "2GiB";
+        };
+        disks = [
+          {
+            name = "root";
+            size = "10GiB";
+            pool = "fast";
+          }
+          {
+            name = "data";
+            size = "5GiB";
+            pool = "bulk";
+          }
+          {
+            name = "logs";
+            size = "1GiB";
+            pool = "bulk";
+          }
+        ];
+      }
+      &&
+        map (n: n.name) wres."vm/web".spec.networks == [
+          "eth0"
+          "eth1"
+        ]
+      && wres."vm/web".spec.autostart
+      && wres."vm/web".spec.imageServer == "images.linuxcontainers.org";
+    "workloads: no workloads gives an IR without resources" =
+      (workloadsWith { vms = { }; }).config.strata.ir.resources == [ ]
+      &&
+        failedAssertions (workloadsWith {
+          vms = { };
+        }) == [ ];
+    "workloads: the IR is the same on every evaluation" =
+      builtins.toJSON wir == builtins.toJSON
+        (workloadsWith {
+          compute.imageServers = [ "images.linuxcontainers.org" ];
+          inherit (workloads.config.strata.workloads) vms;
+        }).config.strata.ir;
+    "workloads: the IR does not change the system" =
+      workloads.config.system.build.toplevel.drvPath == (workloadsWith {
+        compute.imageServers = [ "images.linuxcontainers.org" ];
+        vms = { };
+      }).config.system.build.toplevel.drvPath;
+    "workloads: evaluating the IR fails when an assertion fails" =
+      throws
+        (workloadsWith (oneVM {
+          disks.root.pool = "nope";
+        })).config.strata.ir;
+    "workloads: image servers are sorted and unique in the IR" =
+      (workloadsWith {
+        compute.imageServers = [
+          "images.linuxcontainers.org"
+          "cloud-images.example.org"
+          "images.linuxcontainers.org"
+        ];
+        vms = { };
+      }).config.strata.ir.host.imageServers == [
+        "cloud-images.example.org"
+        "images.linuxcontainers.org"
+      ];
+    "workloads: limits are in the IR when set" =
+      (workloadsWith (
+        oneVM { }
+        // {
+          compute.limits = {
+            cpu = 8;
+            memory = "16GiB";
+          };
+        }
+      )).config.strata.ir.host.limits == {
+        cpu = 8;
+        memory = "16GiB";
+      };
+    "workloads: undeclared pool fails" =
+      workloadFails ''vm1.disks.root.pool: "nope" is not declared in strata.storage.pools''
+        (oneVM {
+          disks.root.pool = "nope";
+        });
+    "workloads: no pool and no default pool fails" =
+      workloadFails "vm1.disks.root.pool: not set and there is no strata.storage.defaultPool"
+        (oneVM { } // { defaultPool = null; });
+    "workloads: undeclared network fails" =
+      workloadFails ''vm1.networks.eth0.network: "wan" is not declared''
+        (oneVM {
+          networks.eth0.network = "wan";
+        });
+    "workloads: image server not allowed fails" =
+      workloadFails ''vm1.imageServer: "images.example.org" is not in strata.compute.incus.imageServers''
+        (oneVM {
+          image = "x";
+          imageServer = "images.example.org";
+        });
+    "workloads: image server without image fails" = workloadFails "vm1: imageServer needs image" (
+      oneVM { imageServer = "images.linuxcontainers.org"; }
+      // {
+        compute.imageServers = [ "images.linuxcontainers.org" ];
+      }
+    );
+    "workloads: missing root disk fails" = workloadFails ''vm1: a disk named "root"'' {
+      vms.vm1 = vmBase // {
+        disks.data.size = "1GiB";
+      };
+    };
+    "workloads: small root disk and memory fail" =
+      workloadFails "root disk needs at least 1GiB" (oneVM {
+        disks.root.size = "512MiB";
+      })
+      && workloadFails "resources.memory: at least 128MiB" (oneVM {
+        resources = {
+          cpu = 1;
+          memory = "64MiB";
+        };
+      });
+    "workloads: invalid names fail" =
+      workloadFails "strata.workloads.vms.Web_1: the name" { vms.Web_1 = vmBase; }
+      && workloadFails "vm1.disks.Data: the name" (oneVM {
+        disks = {
+          root.size = "10GiB";
+          Data.size = "1GiB";
+        };
+      })
+      && workloadFails "vm1.networks.eth-0: the name" (oneVM {
+        networks.eth-0.network = "lan";
+      })
+      && workloadFails "vm1.disks.eth0: the name" (oneVM {
+        disks = {
+          root.size = "10GiB";
+          eth0.size = "1GiB";
+        };
+        networks.eth0.network = "lan";
+      });
+    "workloads: option types reject bad sizes and CPU counts" =
+      throws
+        (workloadsWith (oneVM {
+          disks.root.size = "10G";
+        })).config.strata.ir
+      &&
+        throws
+          (workloadsWith (oneVM {
+            resources = {
+              cpu = 0;
+              memory = "1GiB";
+            };
+          })).config.strata.ir;
+    "workloads: project limits are checked" =
+      workloadFails "3 VMs exceed strata.compute.incus.limits.instances (2)" {
+        compute.limits.instances = 2;
+        vms = {
+          a = vmBase;
+          b = vmBase;
+          c = vmBase;
+        };
+      }
+      && workloadFails "4 CPUs in total exceed strata.compute.incus.limits.cpu (3)" {
+        compute.limits.cpu = 3;
+        vms = {
+          a = vmBase;
+          b = vmBase;
+        };
+      }
+      && workloadFails "memory in total exceeds strata.compute.incus.limits.memory (3GiB)" {
+        compute.limits.memory = "3GiB";
+        vms = {
+          a = vmBase;
+          b = vmBase;
+        };
+      }
+      &&
+        failedAssertions (workloadsWith {
+          compute.limits = {
+            instances = 2;
+            cpu = 4;
+            memory = "4GiB";
+          };
+          vms = {
+            a = vmBase;
+            b = vmBase;
+          };
+        }) == [ ];
+    "workloads: require the compute role" =
+      hasFailure "strata.workloads.vms requires strata.compute.enable"
+        (hostWith [
+          static
+          {
+            strata = {
+              compute.enable = lib.mkForce false;
+              workloads.vms.vm1 = vmBase;
+              storage = {
+                defaultPool = "fast";
+                pools.fast = pool "zfs" { devices = [ disk1 ]; };
+              };
+            };
+          }
+        ]);
 
     # ---- storage ----
     "storage: valid pools have no failed assertions" = failedAssertions storage == [ ];

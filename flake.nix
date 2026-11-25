@@ -41,6 +41,7 @@
           (lib.fileset.fileFilter (file: file.hasExt "go") ./tools)
           # Golden files used by Go tests.
           ./internal/install/testdata
+          ./internal/ir/testdata
         ];
       };
 
@@ -143,6 +144,7 @@
             actionlint
             shellcheck
             govulncheck
+            jq
           ];
 
           shellHook = ''
@@ -244,7 +246,7 @@
                 touch $out
               '';
 
-          examples = import ./nix/tests/examples.nix { inherit pkgs lib; };
+          examples = import ./nix/tests/examples.nix { inherit self nixpkgs pkgs; };
 
           module-eval = import ./nix/tests/modules.nix {
             inherit

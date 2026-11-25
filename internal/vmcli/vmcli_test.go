@@ -49,11 +49,15 @@ func (f *fakeVMs) GetVM(_ context.Context, name string) (workload.VMStatus, erro
 	return v, nil
 }
 
-func (f *fakeVMs) CreateVM(_ context.Context, vm workload.VM) error {
+func (f *fakeVMs) CreateVM(_ context.Context, vm workload.VM, meta workload.Meta) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.vms[vm.Name] = workload.VMStatus{Spec: vm, Status: "Stopped", Addresses: []string{"192.0.2.5"}}
+	f.vms[vm.Name] = workload.VMStatus{Spec: vm, Meta: meta, Status: "Stopped", Addresses: []string{"192.0.2.5"}}
 	return f.fail
+}
+
+func (f *fakeVMs) Host(context.Context) (workload.Host, error) {
+	return workload.Host{Pools: []string{"fast"}, Networks: []string{"lan"}, Volumes: []string{}}, f.fail
 }
 
 func (f *fakeVMs) VMAction(_ context.Context, name, action string, force bool, timeout int) error {
@@ -269,5 +273,34 @@ func TestUpdateAndDelete(t *testing.T) {
 	code, out, errOut := vm(t, socket, "delete", "web-01", "--confirm", "web-01", "--stop")
 	if code != cli.ExitOK || !strings.Contains(out, "Data volumes kept (not deleted): bulk/web-01-data") {
 		t.Errorf("delete: %d %q %q", code, out, errOut)
+	}
+}
+
+func TestOwnerAndDrift(t *testing.T) {
+	socket, f := serve(t)
+	vmSpec, err := workload.ParseVM(strings.NewReader(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.vms["web-01"] = workload.VMStatus{
+		Spec: vmSpec, Meta: workload.Meta{Owner: workload.OwnerGitOps, Protected: true}, Status: "Running",
+		Drift: []string{`config limits.cpu: "8", want "1"`},
+	}
+	code, out, _ := vm(t, socket, "list")
+	if code != cli.ExitOK || !strings.Contains(out, "OWNER") || !strings.Contains(out, "gitops,protected,drift") {
+		t.Errorf("list: %d\n%s", code, out)
+	}
+	code, out, _ = vm(t, socket, "show", "web-01")
+	if code != cli.ExitOK || !strings.Contains(out, "Owner:     gitops\nProtected: true\n") ||
+		!strings.Contains(out, "Drift (changed outside Strata):\n  config limits.cpu: \"8\", want \"1\"") {
+		t.Errorf("show: %d\n%s", code, out)
+	}
+	file := filepath.Join(t.TempDir(), "web.json")
+	if err := os.WriteFile(file, []byte(spec), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	code, _, errOut := vm(t, socket, "update", "-f", file)
+	if code != cli.ExitError || !strings.Contains(errOut, "managed by Git") {
+		t.Errorf("update: %d %q", code, errOut)
 	}
 }

@@ -260,9 +260,9 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 			return printJSON(stdout, vms)
 		}
 		tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-		_, _ = fmt.Fprintln(tw, "NAME\tSTATUS\tCPU\tMEMORY\tADDRESSES")
+		_, _ = fmt.Fprintln(tw, "NAME\tSTATUS\tOWNER\tCPU\tMEMORY\tADDRESSES")
 		for _, v := range vms {
-			_, _ = fmt.Fprintf(tw, "%s\t%s\t%d\t%s\t%s\n", v.Spec.Name, v.Status, v.Spec.Resources.CPU,
+			_, _ = fmt.Fprintf(tw, "%s\t%s\t%s\t%d\t%s\t%s\n", v.Spec.Name, v.Status, ownerLabel(v), v.Spec.Resources.CPU,
 				v.Spec.Resources.Memory, strings.Join(v.Addresses, ","))
 		}
 		_ = tw.Flush()
@@ -456,6 +456,26 @@ func show(w io.Writer, v workload.VMStatus) {
 	if len(v.Addresses) > 0 {
 		_, _ = fmt.Fprintf(w, "Addresses: %s\n", strings.Join(v.Addresses, ", "))
 	}
+	_, _ = fmt.Fprintf(w, "Owner:     %s\nProtected: %v\n", v.Owner, v.Protected)
+	if len(v.Drift) > 0 {
+		_, _ = fmt.Fprintln(w, "Drift (changed outside Strata):")
+		for _, d := range v.Drift {
+			_, _ = fmt.Fprintf(w, "  %s\n", d)
+		}
+	}
+}
+
+// ownerLabel is the owner column of `strata vm list`: the owner, marked
+// when protected or changed outside Strata.
+func ownerLabel(v workload.VMStatus) string {
+	l := v.Owner
+	if v.Protected {
+		l += ",protected"
+	}
+	if len(v.Drift) > 0 {
+		l += ",drift"
+	}
+	return l
 }
 
 func printJSON(w io.Writer, v any) int {

@@ -52,7 +52,7 @@ func (f *fakeVMs) GetVM(_ context.Context, name string) (workload.VMStatus, erro
 	return v, nil
 }
 
-func (f *fakeVMs) CreateVM(_ context.Context, vm workload.VM) error {
+func (f *fakeVMs) CreateVM(_ context.Context, vm workload.VM, meta workload.Meta) error {
 	if f.block != nil {
 		<-f.block
 	}
@@ -62,8 +62,12 @@ func (f *fakeVMs) CreateVM(_ context.Context, vm workload.VM) error {
 	if f.fail != nil {
 		return f.fail
 	}
-	f.vms[vm.Name] = workload.VMStatus{Spec: vm, Status: "Stopped"}
+	f.vms[vm.Name] = workload.VMStatus{Spec: vm, Meta: meta, Status: "Stopped"}
 	return nil
+}
+
+func (f *fakeVMs) Host(context.Context) (workload.Host, error) {
+	return workload.Host{Pools: []string{"fast"}, Networks: []string{"lan"}, Volumes: []string{"fast/web-01-data"}}, f.fail
 }
 
 func (f *fakeVMs) VMAction(_ context.Context, name, action string, force bool, timeout int) error {
@@ -418,5 +422,68 @@ func TestDelete(t *testing.T) {
 	done := h.wait(t, op.ID)
 	if done.Status != StatusSucceeded || !strings.Contains(fmt.Sprint(done.Result), "bulk/web-01-data") {
 		t.Errorf("delete: %+v", done)
+	}
+}
+
+func TestCLICreatesAreOwnedByTheCLI(t *testing.T) {
+	h := start(t, allowAll, true)
+	_, body := h.do(t, http.MethodPost, "/api/v1/vms", spec)
+	var op Operation
+	_ = json.Unmarshal(body, &op)
+	h.wait(t, op.ID)
+	if st := h.fake.vms["web-01"]; st.Owner != workload.OwnerCLI || st.Protected {
+		t.Errorf("meta %+v", st.Meta)
+	}
+}
+
+func TestGitManagedVMsRefuseChanges(t *testing.T) {
+	h := start(t, allowAll, true)
+	vm, err := workload.ParseVM(strings.NewReader(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.fake.vms["web-01"] = workload.VMStatus{Spec: vm, Meta: workload.Meta{Owner: workload.OwnerGitOps}, Status: "Running"}
+	bigger := strings.Replace(spec, `"cpu":1`, `"cpu":2`, 1)
+
+	code, body := h.do(t, http.MethodPut, "/api/v1/vms/web-01?plan=true", bigger)
+	if code != http.StatusConflict || !strings.Contains(string(body), "git_managed") || !strings.Contains(string(body), "configuration repository") {
+		t.Errorf("plan: %d %s", code, body)
+	}
+	for _, req := range [][2]string{
+		{http.MethodPut, "/api/v1/vms/web-01?confirm=anything"},
+		{http.MethodDelete, "/api/v1/vms/web-01?confirm=web-01&stop=true"},
+	} {
+		code, body := h.do(t, req[0], req[1], bigger)
+		var op Operation
+		if code != http.StatusAccepted || json.Unmarshal(body, &op) != nil {
+			t.Fatalf("%s %s: %d %s", req[0], req[1], code, body)
+		}
+		if done := h.wait(t, op.ID); done.Status != StatusFailed || !strings.Contains(done.Error, "managed by Git") {
+			t.Errorf("%s: %+v", req[0], done)
+		}
+	}
+	if _, ok := h.fake.vms["web-01"]; !ok || h.fake.vms["web-01"].Spec.Resources.CPU != 1 {
+		t.Error("the Git-managed VM was changed")
+	}
+	// Lifecycle actions stay allowed.
+	code, body = h.do(t, http.MethodPost, "/api/v1/vms/web-01/stop", "")
+	var op Operation
+	if code != http.StatusAccepted || json.Unmarshal(body, &op) != nil {
+		t.Fatalf("stop: %d %s", code, body)
+	}
+	if done := h.wait(t, op.ID); done.Status != StatusSucceeded {
+		t.Errorf("stop: %+v", done)
+	}
+}
+
+func TestHost(t *testing.T) {
+	h := start(t, allowAll, true)
+	code, body := h.do(t, http.MethodGet, "/api/v1/host", "")
+	if code != http.StatusOK || string(body) != `{"pools":["fast"],"networks":["lan"],"volumes":["fast/web-01-data"]}`+"\n" {
+		t.Errorf("host: %d %s", code, body)
+	}
+	h = start(t, allowAll, false)
+	if code, _ := h.do(t, http.MethodGet, "/api/v1/host", ""); code != http.StatusServiceUnavailable {
+		t.Errorf("no backend: %d", code)
 	}
 }

@@ -115,12 +115,14 @@ today:
 | `nix/tests/` | Nix evaluation tests and NixOS VM tests (`nixos/`) |
 | `examples/standalone/` | Example host with declared workloads (its IR is checked by the `examples` check) |
 | `internal/ir` | The IR (`ir.strata.dev/v1alpha1`): parsing and validation |
+| `internal/planner` | Node plans: desired IR vs. observed VMs and host (ADR-0024) |
+| `internal/reconciler` | Applies approved plans through a provider and verifies convergence (ADR-0024) |
 | `internal/controller`, `cmd/strata-controller` | Control plane; currently `validate-ir` |
 | `docs/` | Development, administration and installation documentation |
 | `.github/workflows/` | CI |
 
 Planned (not yet created):
-`internal/{networking,...}` (later), `internal/{gitops,planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
+`internal/{networking,...}` (later), `internal/gitops` (M3), `api/openapi`, `web/` (M5),
 `internal/cluster` (M6).
 
 ## Current status
@@ -149,7 +151,8 @@ Planned (not yet created):
 | M2 acceptance on physical hardware | **Passed** (GMKtec M6 Ultra, AMD; see [results](docs/installation/hardware-validation.md#m2-results)) |
 | NAT/routed guest networks; bonds | Planned (later) |
 | `strata.workloads.vms` and the IR `ir.strata.dev/v1alpha1` (`config.strata.ir`, `strata-controller validate-ir`); not applied yet | **Implemented** (M3 slice 1, experimental; ADR-0023) |
-| GitOps, planner, reconciler | Planned (M3 slices 2–3) |
+| Planner and reconciler (`internal/planner`, `internal/reconciler`; tested against a mock provider), VM owner and protection, drift reporting, `strata vm` refusing Git-owned VMs | **Implemented** (M3 slice 2, experimental; ADR-0024); not yet driven by Git |
+| GitOps controller (`strata config`) | Planned (M3 slice 3) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
 | Clustering | Planned (M6) |
@@ -311,8 +314,9 @@ Slices:
 1. The IR and the Nix side: `strata.workloads.vms`, `config.strata.ir`,
    `internal/ir`, `strata-controller validate-ir` (ADR-0023). **Done.**
 2. Planning and reconciliation against a mock provider: a plan across all
-   VMs (create, update, delete, unreconcilable, drift), owner labels,
-   adoption.
+   VMs (create, update, restore, lifecycle, delete, unreconcilable), owner
+   and protection labels, drift reported by the agent, `strata vm` refusing
+   changes to Git-owned VMs (ADR-0024). **Done.**
 3. The controller: Git sync with signature and fast-forward checks,
    sandboxed evaluation, approval, execution through the agent, deployment
    records, `strata.gitops`, `strata config`, VM test with a Git server.
@@ -1101,3 +1105,51 @@ Slices:
   `internal/ir/testdata/standalone.json`, which the Go tests parse. An
   invalid workload blocks host rebuilds until it is fixed. The IR is per
   node; a cluster layer (M6) can produce it. Supersedes ADR-0005.
+
+### ADR-0024: Planning and reconciliation
+
+- **Context:** M3 applies the desired state in the IR (ADR-0023) to a node.
+  The milestone decisions require approval by plan ID, deletions only with
+  approval and with data volumes kept, Git ownership of declared VMs, and
+  success only after verification.
+- **Decision:**
+  - **Ownership and protection** are recorded on the Incus instance:
+    `user.strata.owner=gitops` and `user.strata.protected=true`, each set
+    only when it applies, so VMs from before M3 are unchanged and belong to
+    the CLI. Both are part of what verification compares.
+  - **Drift** is the difference between an instance and the spec and meta
+    Strata recorded on it (the M2 verification, now reported by
+    `ListVMs`/`GetVM` instead of failing). An update of a drifted VM is
+    still refused; `RestoreVM` puts the recorded state back, with a stop
+    and start for a running VM.
+  - The **planner** (`internal/planner`) is a pure function of the IR and
+    an observation (all Strata VMs, and the pools, networks and data
+    volumes the project can use, as the agent reports them). It makes one
+    item per resource: create; update (the `workload.PlanVM` changes and
+    plan ID); restore (then the update); lifecycle; delete (Git-owned VMs
+    no longer declared, data volumes kept); or unreconcilable, with
+    reasons: owned by the CLI (adoption is explicit), a host object not
+    applied yet, a kept data volume in the way (until M4), a refused
+    change, the project limits exceeded counting CLI VMs too, or a
+    protected VM that would be deleted or restarted. Only the lifecycle
+    change of an unreconcilable item is applied. CLI VMs that are not
+    declared are listed as unmanaged and never touched.
+  - The **plan ID** hashes the desired resources and host context and the
+    observation; `Safe()` (no restarts, deletions, restores or
+    unreconcilable items) is what opt-in automatic application may apply.
+  - The **reconciler** (`internal/reconciler`) plans again and applies
+    only if the ID is unchanged (`ErrStale` otherwise, nothing applied);
+    applies lifecycle changes, restores, updates, deletions (which free
+    limits), then creations, each verified by the provider; starts a VM
+    it created (the power state is not declared in M3); stops at the
+    first failure; skips unreconcilable items; and finally plans again:
+    anything but unreconcilable items left is `ErrNotConverged`, so
+    success means the node matches the configuration.
+  - The agent refuses `strata vm update` and `delete` for Git-owned VMs;
+    lifecycle actions stay allowed. Operations only the controller may
+    call (creating as Git, restoring, adopting) come with the controller's
+    identity in slice 3.
+- **Consequences:** a stuck item does not block the rest of the node's
+  changes, and stays visible in every plan. Restoring a running VM always
+  restarts it, even for a change that would not need it. Applying an
+  unchanged configuration again does nothing.

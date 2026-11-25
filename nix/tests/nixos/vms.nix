@@ -238,6 +238,41 @@ pkgs.testers.runNixOSTest {
         out = hv01.fail(admin("create -f /tmp/remote.json") + " 2>&1")
         assert "server:alias is not accepted" in out, out
 
+    with subtest("owner, protection and drift are shown"):
+        out = hv01.succeed(admin("show blank"))
+        assert "Owner:     cli\nProtected: false" in out and "Drift" not in out, out
+        # A change made with incus directly (as root) is drift.
+        hv01.succeed("incus config set blank limits.cpu 2 --project strata")
+        out = hv01.succeed(admin("show blank"))
+        assert 'Drift (changed outside Strata):\n  config limits.cpu: "2", want "1"' in out, out
+        assert "cli,drift" in hv01.succeed(admin("list"))
+        hv01.succeed("incus config set blank limits.cpu 1 --project strata")
+        assert "Drift" not in hv01.succeed(admin("show blank"))
+        # VMs from before M3 have no owner key and count as the CLI's.
+        assert "user.strata.owner" not in inst("web-01")["config"], inst("web-01")["config"]
+
+    with subtest("a VM managed through Git refuses strata vm update and delete"):
+        hv01.succeed("incus config set blank user.strata.owner gitops --project strata")
+        out = hv01.succeed(admin("show blank"))
+        assert "Owner:     gitops" in out and "Drift" not in out, out
+        hv01.succeed("jq '.resources.cpu = 2' /tmp/blank.json > /tmp/blank2.json && chmod 644 /tmp/blank2.json")
+        out = hv01.fail(admin("update -f /tmp/blank2.json --yes") + " 2>&1")
+        assert "managed by Git" in out and "configuration repository" in out, out
+        out = hv01.fail(admin("delete blank --confirm blank") + " 2>&1")
+        assert "managed by Git" in out, out
+        assert inst("blank")["config"]["limits.cpu"] == "1"
+        # Lifecycle actions stay allowed.
+        hv01.succeed(admin("start blank"))
+        hv01.succeed(admin("stop blank --force --timeout 0"))
+        hv01.succeed("incus config unset blank user.strata.owner --project strata")
+
+    with subtest("the agent lists what the project can use on the host"):
+        host = json.loads(hv01.succeed(
+            "su strata-admin -c 'curl -sf --unix-socket /run/strata/agent.sock http://agent/api/v1/host'"))
+        assert host["pools"] == ["vmpool"], host
+        assert host["networks"] == ["lan"], host
+        assert "vmpool/web-01-data" in host["volumes"], host
+
     with subtest("images download only from declared servers"):
         cfg = json.loads(hv01.succeed("incus query /1.0/projects/strata"))["config"]
         assert cfg["restricted.images.servers"] == "images.example.invalid", cfg

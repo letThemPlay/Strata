@@ -18,8 +18,10 @@ import (
 // Instance keys Strata sets. Instances without keyManaged are not Strata's
 // and are invisible to the provider.
 const (
-	keyManaged = "user.strata.managed"
-	keySpec    = "user.strata.spec"
+	keyManaged   = "user.strata.managed"
+	keySpec      = "user.strata.spec"
+	keyOwner     = "user.strata.owner"     // set only for gitops; absent: cli
+	keyProtected = "user.strata.protected" // set only when true
 )
 
 // instance is the part of an Incus instance the provider reads.
@@ -39,8 +41,10 @@ type instance struct {
 	} `json:"state"`
 }
 
-// instanceFor returns the Incus configuration and devices for vm.
-func instanceFor(vm workload.VM) (map[string]string, map[string]map[string]string, error) {
+// instanceFor returns the Incus configuration and devices for vm and meta.
+// The owner and protected keys are set only when they differ from the
+// defaults, so VMs created before M3 are unchanged.
+func instanceFor(vm workload.VM, meta workload.Meta) (map[string]string, map[string]map[string]string, error) {
 	spec, err := json.Marshal(vm)
 	if err != nil {
 		return nil, nil, fmt.Errorf("encode spec: %w", err)
@@ -53,6 +57,12 @@ func instanceFor(vm workload.VM) (map[string]string, map[string]map[string]strin
 		"security.nesting": "false",
 		keyManaged:         "true",
 		keySpec:            string(spec),
+	}
+	if meta.Owner == workload.OwnerGitOps {
+		cfg[keyOwner] = workload.OwnerGitOps
+	}
+	if meta.Protected {
+		cfg[keyProtected] = "true"
 	}
 	if vm.CloudInit != nil && len(vm.CloudInit.SSHAuthorizedKeys) > 0 {
 		var b strings.Builder
@@ -102,12 +112,28 @@ func (c *Client) getInstance(ctx context.Context, name string) (instance, error)
 	return inst, nil
 }
 
+// metaOf returns the meta recorded on an instance.
+func metaOf(inst instance) workload.Meta {
+	owner := workload.OwnerCLI
+	if inst.Config[keyOwner] == workload.OwnerGitOps {
+		owner = workload.OwnerGitOps
+	}
+	return workload.Meta{Owner: owner, Protected: inst.Config[keyProtected] == "true"}
+}
+
+// status returns a VM's status: its recorded spec and meta, and how the
+// instance differs from them (drift).
 func status(inst instance) (workload.VMStatus, error) {
 	var vm workload.VM
 	if err := json.Unmarshal([]byte(inst.Config[keySpec]), &vm); err != nil {
 		return workload.VMStatus{}, fmt.Errorf("vm %s: stored spec: %w", inst.Name, err)
 	}
-	st := workload.VMStatus{Spec: vm, Status: inst.Status}
+	meta := metaOf(inst)
+	drift, err := differences(vm, meta, inst)
+	if err != nil {
+		return workload.VMStatus{}, err
+	}
+	st := workload.VMStatus{Spec: vm, Meta: meta, Status: inst.Status, Drift: drift}
 	if inst.State != nil {
 		for name, n := range inst.State.Network {
 			if name == "lo" {
@@ -154,15 +180,16 @@ func (c *Client) ListVMs(ctx context.Context) ([]workload.VMStatus, error) {
 	return out, nil
 }
 
-// CreateVM creates a stopped VM from vm and verifies the result. Data
+// CreateVM creates a stopped VM from vm, recording meta, and verifies the
+// result. Data
 // volumes are created first; if anything fails, the volumes created by this
 // call (new and empty) are removed again. Existing volumes are never
 // reused or removed.
-func (c *Client) CreateVM(ctx context.Context, vm workload.VM) (err error) {
+func (c *Client) CreateVM(ctx context.Context, vm workload.VM, meta workload.Meta) (err error) {
 	if err := vm.Validate(); err != nil {
 		return fmt.Errorf("vm %s: %w", vm.Name, err)
 	}
-	cfg, devices, err := instanceFor(vm)
+	cfg, devices, err := instanceFor(vm, meta)
 	if err != nil {
 		return err
 	}
@@ -212,14 +239,26 @@ func (c *Client) CreateVM(ctx context.Context, vm workload.VM) (err error) {
 	if err != nil {
 		return err
 	}
-	return verify(vm, inst)
+	return verify(vm, meta, inst)
 }
 
-// verify compares an instance with the spec it was created from.
-func verify(vm workload.VM, inst instance) error {
-	cfg, devices, err := instanceFor(vm)
+// verify compares an instance with the spec and meta it was created from.
+func verify(vm workload.VM, meta workload.Meta, inst instance) error {
+	diffs, err := differences(vm, meta, inst)
 	if err != nil {
 		return err
+	}
+	if len(diffs) > 0 {
+		return fmt.Errorf("vm %s: %w: %s", vm.Name, workload.ErrVerify, strings.Join(diffs, "; "))
+	}
+	return nil
+}
+
+// differences lists how an instance differs from a spec and meta, sorted.
+func differences(vm workload.VM, meta workload.Meta, inst instance) ([]string, error) {
+	cfg, devices, err := instanceFor(vm, meta)
+	if err != nil {
+		return nil, err
 	}
 	var diffs []string
 	for k, v := range cfg {
@@ -237,11 +276,13 @@ func verify(vm workload.VM, inst instance) error {
 			diffs = append(diffs, fmt.Sprintf("unexpected device %s", name))
 		}
 	}
-	if len(diffs) > 0 {
-		slices.Sort(diffs)
-		return fmt.Errorf("vm %s: %w: %s", vm.Name, workload.ErrVerify, strings.Join(diffs, "; "))
+	for _, k := range []string{keyOwner, keyProtected, "cloud-init.user-data"} {
+		if _, want := cfg[k]; !want && inst.Config[k] != "" {
+			diffs = append(diffs, fmt.Sprintf("config %s: %q, want unset", k, inst.Config[k]))
+		}
 	}
-	return nil
+	slices.Sort(diffs)
+	return diffs, nil
 }
 
 // wantStatus is the status an action must reach.

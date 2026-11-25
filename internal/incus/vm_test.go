@@ -32,6 +32,10 @@ type fakeVMServer struct {
 	failPut bool
 	// lastSource is the source of the last instance creation.
 	lastSource map[string]any
+	// pools and networks are what GET /1.0/storage-pools and
+	// /1.0/networks list.
+	pools    []string
+	networks []map[string]any
 }
 
 func reply(w http.ResponseWriter, code int, v any) {
@@ -96,6 +100,23 @@ func (f *fakeVMServer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		reply(w, 200, inst)
+	case r.Method == http.MethodGet && p == "/1.0/storage-pools":
+		out := []string{}
+		for _, pool := range f.pools {
+			out = append(out, "/1.0/storage-pools/"+pool)
+		}
+		reply(w, 200, out)
+	case r.Method == http.MethodGet && p == "/1.0/networks":
+		reply(w, 200, f.networks)
+	case r.Method == http.MethodGet && strings.HasSuffix(p, "/volumes/custom"):
+		pool := strings.Split(strings.TrimPrefix(p, "/1.0/storage-pools/"), "/")[0]
+		out := []string{}
+		for v := range f.volumes {
+			if vp, name, _ := strings.Cut(v, "/"); vp == pool {
+				out = append(out, "/1.0/storage-pools/"+pool+"/volumes/custom/"+name+"?project=strata")
+			}
+		}
+		reply(w, 200, out)
 	case strings.HasPrefix(p, "/1.0/storage-pools/") && strings.Contains(p, "/volumes/custom"):
 		parts := strings.Split(strings.TrimPrefix(p, "/1.0/storage-pools/"), "/")
 		pool := parts[0]
@@ -144,7 +165,7 @@ func testVM() workload.VM {
 func TestCreateVM(t *testing.T) {
 	f, c := newFakeVMs(t)
 	ctx := context.Background()
-	if err := c.CreateVM(ctx, testVM()); err != nil {
+	if err := c.CreateVM(ctx, testVM(), workload.Meta{Owner: workload.OwnerCLI}); err != nil {
 		t.Fatalf("CreateVM: %v", err)
 	}
 	inst := f.instances["web-01"]
@@ -175,7 +196,7 @@ func TestCreateVM(t *testing.T) {
 		t.Errorf("ListVMs: %+v %v", list, err)
 	}
 
-	if err := c.CreateVM(ctx, testVM()); !errors.Is(err, workload.ErrExists) {
+	if err := c.CreateVM(ctx, testVM(), workload.Meta{Owner: workload.OwnerCLI}); !errors.Is(err, workload.ErrExists) {
 		t.Errorf("second create: %v", err)
 	}
 }
@@ -183,7 +204,7 @@ func TestCreateVM(t *testing.T) {
 func TestCreateVMRefusesExistingVolume(t *testing.T) {
 	f, c := newFakeVMs(t)
 	f.volumes["bulk/web-01-data"] = true
-	err := c.CreateVM(context.Background(), testVM())
+	err := c.CreateVM(context.Background(), testVM(), workload.Meta{Owner: workload.OwnerCLI})
 	if !errors.Is(err, workload.ErrExists) || !strings.Contains(err.Error(), "never reused") {
 		t.Fatalf("got %v", err)
 	}
@@ -195,7 +216,7 @@ func TestCreateVMRefusesExistingVolume(t *testing.T) {
 func TestCreateVMFailureRemovesOnlyNewVolumes(t *testing.T) {
 	f, c := newFakeVMs(t)
 	f.failCreate = true
-	err := c.CreateVM(context.Background(), testVM())
+	err := c.CreateVM(context.Background(), testVM(), workload.Meta{Owner: workload.OwnerCLI})
 	if err == nil || !strings.Contains(err.Error(), "Failed creating instance") {
 		t.Fatalf("got %v", err)
 	}
@@ -210,7 +231,7 @@ func TestCreateVMVerifies(t *testing.T) {
 		inst["config"].(map[string]any)["limits.cpu"] = "8"
 		inst["devices"].(map[string]any)["extra"] = map[string]any{"type": "disk"}
 	}
-	err := c.CreateVM(context.Background(), testVM())
+	err := c.CreateVM(context.Background(), testVM(), workload.Meta{Owner: workload.OwnerCLI})
 	if !errors.Is(err, workload.ErrVerify) || !strings.Contains(err.Error(), `config limits.cpu: "8", want "2"`) ||
 		!strings.Contains(err.Error(), "unexpected device extra") {
 		t.Fatalf("got %v", err)
@@ -224,7 +245,7 @@ func TestCreateVMVerifies(t *testing.T) {
 func TestVMActions(t *testing.T) {
 	f, c := newFakeVMs(t)
 	ctx := context.Background()
-	if err := c.CreateVM(ctx, testVM()); err != nil {
+	if err := c.CreateVM(ctx, testVM(), workload.Meta{Owner: workload.OwnerCLI}); err != nil {
 		t.Fatal(err)
 	}
 	for _, a := range []string{workload.ActionStart, workload.ActionRestart, workload.ActionStop} {
@@ -261,7 +282,7 @@ func TestUnmanagedInstancesAreInvisible(t *testing.T) {
 func createdVM(t *testing.T, running bool) (*fakeVMServer, *Client) {
 	t.Helper()
 	f, c := newFakeVMs(t)
-	if err := c.CreateVM(context.Background(), testVM()); err != nil {
+	if err := c.CreateVM(context.Background(), testVM(), workload.Meta{Owner: workload.OwnerCLI}); err != nil {
 		t.Fatal(err)
 	}
 	if running {
@@ -383,7 +404,7 @@ func TestCreateFromImageServer(t *testing.T) {
 	f, c := newFakeVMs(t)
 	vm := testVM()
 	vm.ImageServer, vm.Image = "images.linuxcontainers.org", "debian/13/cloud"
-	if err := c.CreateVM(context.Background(), vm); err != nil {
+	if err := c.CreateVM(context.Background(), vm, workload.Meta{Owner: workload.OwnerCLI}); err != nil {
 		t.Fatal(err)
 	}
 	want := map[string]any{
@@ -394,7 +415,7 @@ func TestCreateFromImageServer(t *testing.T) {
 		t.Errorf("source %v", f.lastSource)
 	}
 	f2, c2 := newFakeVMs(t)
-	if err := c2.CreateVM(context.Background(), testVM()); err != nil {
+	if err := c2.CreateVM(context.Background(), testVM(), workload.Meta{Owner: workload.OwnerCLI}); err != nil {
 		t.Fatal(err)
 	}
 	if fmt.Sprint(f2.lastSource) != fmt.Sprint(map[string]any{"type": "image", "alias": "debian-13"}) {

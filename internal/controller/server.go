@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/letthemplay/Strata/internal/agent/api"
@@ -41,7 +43,90 @@ func (s *Server) Handler() http.Handler {
 		}
 		writeJSON(w, http.StatusOK, p)
 	})
+	mux.HandleFunc("POST /api/v1/config/apply", s.apply)
+	mux.HandleFunc("POST /api/v1/config/pin", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Commit string `json:"commit"`
+		}
+		if !decode(w, r, &req) {
+			return
+		}
+		uid, _ := api.CallerUID(r)
+		st, err := s.Controller.Pin(r.Context(), req.Commit, uid)
+		respond(w, http.StatusOK, st, err)
+	})
+	mux.HandleFunc("POST /api/v1/config/unpin", func(w http.ResponseWriter, r *http.Request) {
+		uid, _ := api.CallerUID(r)
+		st, err := s.Controller.Unpin(r.Context(), uid)
+		respond(w, http.StatusOK, st, err)
+	})
+	mux.HandleFunc("POST /api/v1/config/adopt/{name}", func(w http.ResponseWriter, r *http.Request) {
+		uid, _ := api.CallerUID(r)
+		st, err := s.Controller.Adopt(r.Context(), r.PathValue("name"), uid)
+		respond(w, http.StatusOK, st, err)
+	})
+	mux.HandleFunc("GET /api/v1/deployments", func(w http.ResponseWriter, r *http.Request) {
+		limit, err := strconv.Atoi(r.URL.Query().Get("limit"))
+		if err != nil || limit < 0 {
+			limit = 0
+		}
+		writeJSON(w, http.StatusOK, s.Controller.History(limit))
+	})
+	mux.HandleFunc("GET /api/v1/deployments/{id}", func(w http.ResponseWriter, r *http.Request) {
+		d, err := s.Controller.Deployment(r.PathValue("id"))
+		respond(w, http.StatusOK, d, err)
+	})
 	return s.authorize(mux)
+}
+
+// apply approves a plan: {"planId": "...", "allowDelete": bool}.
+func (s *Server) apply(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PlanID      string `json:"planId"`
+		AllowDelete bool   `json:"allowDelete"`
+	}
+	if !decode(w, r, &req) {
+		return
+	}
+	uid, _ := api.CallerUID(r)
+	d, err := s.Controller.Apply(req.PlanID, uid, req.AllowDelete) //nolint:contextcheck // The deployment outlives the request.
+	respond(w, http.StatusAccepted, d, err)
+}
+
+// decode reads a small JSON request body; unknown fields are refused.
+func decode(w http.ResponseWriter, r *http.Request, v any) bool {
+	dec := json.NewDecoder(io.LimitReader(r.Body, 4096))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(v); err != nil {
+		writeJSON(w, http.StatusBadRequest, api.ErrorResponse{Error: "request: " + err.Error(), Code: "invalid"})
+		return false
+	}
+	return true
+}
+
+// respond writes v with code, or the error with its status.
+func respond(w http.ResponseWriter, code int, v any, err error) {
+	if err != nil {
+		writeError(w, err)
+		return
+	}
+	writeJSON(w, code, v)
+}
+
+// writeError maps controller errors to HTTP replies.
+func writeError(w http.ResponseWriter, err error) {
+	code, kind := http.StatusInternalServerError, "internal"
+	switch {
+	case errors.Is(err, ErrNotAwaiting), errors.Is(err, ErrBusy):
+		code, kind = http.StatusConflict, "conflict"
+	case errors.Is(err, ErrAllowDelete):
+		code, kind = http.StatusUnprocessableEntity, "allow_delete"
+	case errors.Is(err, ErrInvalidAction):
+		code, kind = http.StatusUnprocessableEntity, "invalid"
+	case errors.Is(err, ErrNoDeployment), errors.Is(err, ErrNoPlan):
+		code, kind = http.StatusNotFound, "not_found"
+	}
+	writeJSON(w, code, api.ErrorResponse{Error: err.Error(), Code: kind})
 }
 
 func (s *Server) authorize(next http.Handler) http.Handler {

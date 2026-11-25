@@ -146,7 +146,7 @@ type harness struct {
 	logs   *lockedBuffer
 }
 
-func start(t *testing.T, authorize func(uint32) error, withBackend bool) *harness {
+func start(t *testing.T, authorize func(uint32) error, withBackend bool, opts ...func(*Server)) *harness {
 	t.Helper()
 	socket := filepath.Join(t.TempDir(), "agent.sock")
 	l, err := net.Listen("unix", socket)
@@ -155,6 +155,9 @@ func start(t *testing.T, authorize func(uint32) error, withBackend bool) *harnes
 	}
 	h := &harness{fake: &fakeVMs{vms: map[string]workload.VMStatus{}}, logs: &lockedBuffer{}}
 	s := &Server{Authorize: authorize, Log: slog.New(slog.NewJSONHandler(h.logs, nil))}
+	for _, o := range opts {
+		o(s)
+	}
 	if withBackend {
 		s.Provider = func() (VMs, func(), error) {
 			h.fake.mu.Lock()
@@ -485,5 +488,124 @@ func TestHost(t *testing.T) {
 	h = start(t, allowAll, false)
 	if code, _ := h.do(t, http.MethodGet, "/api/v1/host", ""); code != http.StatusServiceUnavailable {
 		t.Errorf("no backend: %d", code)
+	}
+}
+
+func (f *fakeVMs) RestoreVM(_ context.Context, name string, _ int) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.vms[name]
+	if !ok {
+		return fmt.Errorf("vm %s: %w", name, workload.ErrNotFound)
+	}
+	st.Drift = nil
+	f.vms[name] = st
+	return nil
+}
+
+func (f *fakeVMs) SetMeta(_ context.Context, name string, meta workload.Meta) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	st, ok := f.vms[name]
+	if !ok {
+		return fmt.Errorf("vm %s: %w", name, workload.ErrNotFound)
+	}
+	st.Meta = meta
+	f.vms[name] = st
+	return nil
+}
+
+func asController(isController bool) func(*Server) {
+	return func(s *Server) { s.IsController = func(uint32) bool { return isController } }
+}
+
+func gitopsVM(t *testing.T, h *harness, drift bool) {
+	t.Helper()
+	vm, err := workload.ParseVM(strings.NewReader(spec))
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := workload.VMStatus{Spec: vm, Meta: workload.Meta{Owner: workload.OwnerGitOps}, Status: "Stopped"}
+	if drift {
+		st.Drift = []string{"config limits.cpu"}
+	}
+	h.fake.mu.Lock()
+	h.fake.vms["web-01"] = st
+	h.fake.mu.Unlock()
+}
+
+func (h *harness) op(t *testing.T, method, path, body string) (int, Operation, string) {
+	t.Helper()
+	code, data := h.do(t, method, path, body)
+	var op Operation
+	if code == http.StatusAccepted {
+		if err := json.Unmarshal(data, &op); err != nil {
+			t.Fatal(err)
+		}
+		op = h.wait(t, op.ID)
+	}
+	return code, op, string(data)
+}
+
+func TestControllerCreatesGitVMs(t *testing.T) {
+	h := start(t, allowAll, true, asController(true))
+	code, op, body := h.op(t, http.MethodPost, "/api/v1/vms?owner=gitops&protected=true", spec)
+	if code != http.StatusAccepted || op.Status != StatusSucceeded {
+		t.Fatalf("create: %d %s %+v", code, body, op)
+	}
+	if st := h.fake.vms["web-01"]; st.Owner != workload.OwnerGitOps || !st.Protected {
+		t.Errorf("meta %+v", st.Meta)
+	}
+	if code, _, body := h.op(t, http.MethodPost, "/api/v1/vms?protected=true", spec); code != http.StatusBadRequest {
+		t.Errorf("protected without owner: %d %s", code, body)
+	}
+}
+
+func TestOnlyTheControllerChangesGitVMs(t *testing.T) {
+	for _, tc := range []struct {
+		method, path, body string
+	}{
+		{http.MethodPost, "/api/v1/vms?owner=gitops", spec},
+		{http.MethodPost, "/api/v1/vms/web-01/restore", ""},
+		{http.MethodPut, "/api/v1/vms/web-01/meta", `{"owner":"gitops","protected":true}`},
+	} {
+		h := start(t, allowAll, true, asController(false))
+		gitopsVM(t, h, true)
+		code, _, body := h.op(t, tc.method, tc.path, tc.body)
+		if code != http.StatusForbidden || !strings.Contains(body, "controller") {
+			t.Errorf("%s %s by an operator: %d %s", tc.method, tc.path, code, body)
+		}
+	}
+	// No controller configured: refused too.
+	h := start(t, allowAll, true)
+	gitopsVM(t, h, true)
+	if code, _, _ := h.op(t, http.MethodPost, "/api/v1/vms/web-01/restore", ""); code != http.StatusForbidden {
+		t.Errorf("restore without a controller: %d", code)
+	}
+}
+
+func TestControllerRestoresUpdatesAndDeletes(t *testing.T) {
+	h := start(t, allowAll, true, asController(true))
+	gitopsVM(t, h, true)
+	if _, op, _ := h.op(t, http.MethodPost, "/api/v1/vms/web-01/restore", ""); op.Status != StatusSucceeded || len(h.fake.vms["web-01"].Drift) != 0 {
+		t.Errorf("restore %+v", op)
+	}
+	if _, op, _ := h.op(t, http.MethodPut, "/api/v1/vms/web-01/meta", `{"owner":"gitops","protected":true}`); op.Status != StatusSucceeded || !h.fake.vms["web-01"].Protected {
+		t.Errorf("meta %+v", op)
+	}
+	if code, _, _ := h.op(t, http.MethodPut, "/api/v1/vms/web-01/meta", `{"owner":"gitops","extra":1}`); code != http.StatusBadRequest {
+		t.Errorf("unknown field: %d", code)
+	}
+	bigger := strings.Replace(spec, `"cpu":1`, `"cpu":2`, 1)
+	code, body := h.do(t, http.MethodPut, "/api/v1/vms/web-01?plan=true", bigger)
+	var plan workload.Plan
+	if code != http.StatusOK || json.Unmarshal(body, &plan) != nil {
+		t.Fatalf("plan: %d %s", code, body)
+	}
+	if _, op, _ := h.op(t, http.MethodPut, "/api/v1/vms/web-01?confirm="+plan.ID, bigger); op.Status != StatusSucceeded {
+		t.Errorf("update %+v", op)
+	}
+	if _, op, _ := h.op(t, http.MethodDelete, "/api/v1/vms/web-01?confirm=web-01", ""); op.Status != StatusSucceeded {
+		t.Errorf("delete %+v", op)
 	}
 }

@@ -59,6 +59,7 @@ func Subcommands(root fs.FS, reload <-chan os.Signal) []cli.Subcommand {
 				incusCreds := fset.String("incus-credentials", "", "directory with "+IncusClientCert+", "+IncusClientKey+" and "+IncusServerCert)
 				incusProject := fset.String("incus-project", DefaultIncusProject, "Incus project of the agent")
 				apiGroup := fset.String("api-group", DefaultAPIGroup, "group whose members may use the local API")
+				controllerUser := fset.String("controller-user", "", "the Strata controller's account, the only caller that may change VMs managed through Git")
 				if err := fset.Parse(args); err != nil {
 					if errors.Is(err, flag.ErrHelp) {
 						return cli.ExitOK
@@ -76,6 +77,9 @@ func Subcommands(root fs.FS, reload <-chan os.Signal) []cli.Subcommand {
 				var backend BackendCheck
 				logger := slog.New(slog.NewJSONHandler(stderr, nil))
 				server := &api.Server{Authorize: api.GroupAuthorizer(*apiGroup), Log: logger}
+				if *controllerUser != "" {
+					server.IsController = api.UserMatcher(*controllerUser)
+				}
 				if *incusAddress != "" {
 					cfg := incus.Config{
 						Address:        *incusAddress,

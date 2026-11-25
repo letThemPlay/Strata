@@ -20,7 +20,8 @@ type Config struct {
 	Branch     string `json:"branch"`
 	// IntervalSeconds is how often the repository is synchronized.
 	IntervalSeconds int `json:"intervalSeconds"`
-	// AutoApply is "none" or "safe" (applied in M3 slice 3b).
+	// AutoApply is "none" or "safe": apply plans without restarts,
+	// deletions, restores and unreconcilable items without approval.
 	AutoApply string `json:"autoApply"`
 	// TrustedSigners are SSH public keys ("TYPE KEY [NAME]") whose
 	// signatures make a commit trusted.
@@ -33,6 +34,9 @@ type Config struct {
 	Token  string `json:"token,omitempty"`
 	// EvalTimeoutSeconds bounds one Nix evaluation.
 	EvalTimeoutSeconds int `json:"evalTimeoutSeconds"`
+	// KeepDeployments is how many finished deployment records to keep; 0
+	// keeps all.
+	KeepDeployments int `json:"keepDeployments,omitempty"`
 }
 
 var (
@@ -78,6 +82,9 @@ func (c Config) Check() error {
 	}
 	if c.EvalTimeoutSeconds < 1 {
 		errs = append(errs, errors.New("evalTimeoutSeconds: at least 1"))
+	}
+	if c.KeepDeployments < 0 {
+		errs = append(errs, errors.New("keepDeployments: must not be negative"))
 	}
 	return errors.Join(errs...)
 }

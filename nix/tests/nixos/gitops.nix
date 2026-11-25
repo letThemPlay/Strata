@@ -1,5 +1,6 @@
 # NixOS VM test: the Strata controller synchronizes a host's configuration
-# repository and plans it (M3 slice 3a, ADR-0025).
+# repository, plans it and applies approved plans (M3 slice 3, ADR-0025,
+# ADR-0026).
 #
 #   git  - sshd; the repository /srv/git/hv01.git, served to the deploy key
 #   hv01 - Strata host with a dir pool, a guest network and strata.gitops
@@ -68,7 +69,38 @@ let
     };
   '';
   hostV1 = hostNix "host-v1.nix" "{ ${vm "web-01"} }";
-  hostV2 = hostNix "host-v2.nix" "{ ${vm "web-01"} ${vm "web-02"} }";
+  # web-01 (cpu, extra settings), web-02 with a data disk, cli-vm as
+  # `strata vm` creates it in the test, web-03.
+  web01 = cpu: extra: ''
+    web-01 = {
+      resources = { cpu = ${toString cpu}; memory = "256MiB"; };
+      disks.root.size = "1GiB";
+      networks.eth0.network = "lan";
+      ${extra}
+    };
+  '';
+  web02 = ''
+    web-02 = {
+      resources = { cpu = 1; memory = "256MiB"; };
+      disks = { root.size = "1GiB"; data.size = "1GiB"; };
+      networks.eth0.network = "lan";
+    };
+  '';
+  cliVM = cpu: ''
+    cli-vm = {
+      resources = { cpu = ${toString cpu}; memory = "256MiB"; };
+      disks.root.size = "1GiB";
+    };
+  '';
+  protected = "lifecycle.protected = true;";
+  hostV2 = hostNix "host-v2.nix" "{ ${web01 1 ""} ${web02} }";
+  hostV3 = hostNix "host-v3.nix" "{ ${web01 2 ""} ${web02} }";
+  hostV4 = hostNix "host-v4.nix" "{ ${web01 2 protected} ${web02} }";
+  hostV5 = hostNix "host-v5.nix" "{ ${web01 2 protected} }";
+  hostV6 = hostNix "host-v6.nix" "{ ${web01 2 protected} ${cliVM 1} }";
+  hostV7 = hostNix "host-v7.nix" "{ ${web01 2 "${protected} autostart = true;"} ${cliVM 1} }";
+  hostV8 = hostNix "host-v8.nix" "{ ${web01 2 "${protected} autostart = true;"} ${cliVM 2} }";
+  hostV9 = hostNix "host-v9.nix" "{ ${web01 2 "${protected} autostart = true;"} ${cliVM 2} ${vm "web-03"} }";
   hostBadPool = hostNix "host-bad.nix" ''{ web-01 = { resources = { cpu = 1; memory = "256MiB"; }; disks.root = { size = "1GiB"; pool = "nopool"; }; }; }'';
   hostThrows = pkgs.writeText "host-throws.nix" ''throw "this commit was evaluated"'';
 
@@ -193,6 +225,11 @@ pkgs.testers.runNixOSTest {
             interval = 15;
           };
         };
+        # The same host applying safe plans by itself, keeping 3 records.
+        specialisation.auto.configuration.strata.gitops = {
+          autoApply = "safe";
+          keepDeployments = 3;
+        };
       };
   };
 
@@ -251,7 +288,7 @@ pkgs.testers.runNixOSTest {
         v1 = commit({"flake.nix": "${flake}", "flake.lock": "${lock}", "host.nix": "${hostV1}"}, message="v1")
         out = hv01.succeed(config("sync"))
         print(out)
-        assert f"Evaluated:   {v1} (signed by alice)" in out, out
+        assert f"Evaluated:    {v1} (signed by alice)" in out, out
         assert "create          vm/web-01" in out, out
         st = status()
         assert st["head"] == v1 and st["evaluated"] == v1 and st["plan"]["items"] == 1 and st["plan"]["safe"], st
@@ -274,7 +311,7 @@ pkgs.testers.runNixOSTest {
         unsigned = commit({"host.nix": "${hostThrows}"}, key=None, message="unsigned")
         out = hv01.fail(config("sync"))
         assert "not signed by a trusted key" in out and unsigned[:12] in out, out
-        assert "Plan:        (none)" in out, out
+        assert "Plan:         (none)" in out, out
         assert not journal_has("this commit was evaluated"), "an unsigned commit was evaluated"
 
     with subtest("a commit signed by another key is refused"):
@@ -310,6 +347,156 @@ pkgs.testers.runNixOSTest {
         )
         out = hv01.succeed(config("plan"))
         assert "create          vm/web-01" in out and "create          vm/web-02" in out, out
+
+    # ---- applying (slice 3b) ----
+
+    def plan_id():
+        return status()["plan"]["id"]
+
+    def apply(*flags):
+        out = hv01.succeed(config(f"apply --plan {plan_id()} --yes " + " ".join(flags)))
+        print(out)
+        assert "SUCCEEDED" in out, out
+        return out
+
+    def inst(name):
+        return json.loads(hv01.succeed(f"incus query '/1.0/instances/{name}?project=strata'"))
+
+    def force_stop(name):
+        # Blank VMs (no OS) ignore the ACPI power button: stop them with
+        # --force before changes that would otherwise restart them.
+        hv01.succeed(f"su strata-admin -c 'strata vm stop {name} --force --timeout 0'")
+
+    with subtest("approving a plan creates the VMs, owned by Git, and records it"):
+        hv01.succeed(config("sync"))
+        apply()
+        for name in ["web-01", "web-02"]:
+            i = inst(name)
+            assert i["status"] == "Running" and i["config"]["user.strata.owner"] == "gitops", i["config"]
+        hv01.succeed("incus storage volume show vmpool web-02-data --project strata")
+        st = status()
+        assert st["lastApplied"] == v2 and st["plan"]["converged"] and "awaiting" not in st, st
+        history = json.loads(hv01.succeed(config("history --json")))
+        rec = history[0]
+        uid = hv01.succeed("id -u strata-admin").strip()
+        assert rec["kind"] == "plan" and rec["state"] == "SUCCEEDED" and rec["commit"] == v2 and rec["approvedBy"] == f"uid:{uid}", rec
+        d = json.loads(hv01.succeed(config(f"show {rec['id']} --json")))
+        assert d["flakeLock"] and d["strataVersion"] and d["irGenerator"] and d["signer"] == "alice", d
+        assert [t["state"] for t in d["transitions"]] == ["AWAITING_APPROVAL", "PENDING", "VALIDATING", "PLANNING", "APPLYING", "VERIFYING", "SUCCEEDED"], d
+        assert d["result"]["converged"], d["result"]
+
+    with subtest("strata vm cannot change Git-owned VMs, but may stop them"):
+        out = hv01.fail("su strata-admin -c 'strata vm delete web-01 --confirm web-01 --stop' 2>&1")
+        assert "managed by Git" in out, out
+        force_stop("web-01")
+        force_stop("web-02")
+        assert "nothing to do" in hv01.succeed(config("sync")), "the power state is not declared"
+
+    with subtest("an edit is applied as an update"):
+        v3 = commit({"host.nix": "${hostV3}"}, message="v3")
+        out = hv01.succeed(config("sync"))
+        assert "update          vm/web-01" in out and "resources.cpu: 1 -> 2" in out, out
+        apply()
+        assert inst("web-01")["config"]["limits.cpu"] == "2"
+
+    with subtest("a force-pushed branch is refused"):
+        as_git(f"cd ~/work && git reset --quiet --hard {v2}")
+        git.succeed("install -o git -m 644 ${hostV1} /var/lib/git/work/host.nix")
+        as_git("cd ~/work && git add -A && git -c user.signingkey=/var/lib/git/signer commit -S --quiet -m rewrite"
+               " && git push --quiet --force /srv/git/hv01.git main")
+        rewritten = as_git("git -C ~/work rev-parse HEAD").strip()
+        out = hv01.fail(config("sync"))
+        assert "does not descend from the last applied commit" in out and rewritten[:12] in out, out
+        assert not journal_has(f"evaluated\",\"commit\":\"{rewritten}")
+        as_git(f"cd ~/work && git reset --quiet --hard {v3} && git push --quiet --force /srv/git/hv01.git main")
+        hv01.succeed(config("sync"))
+
+    with subtest("drift is shown and restored with approval"):
+        hv01.succeed("incus config set web-02 limits.memory 512MiB --project strata")
+        out = hv01.succeed(config("sync"))
+        assert "restore         vm/web-02" in out and "Drift:        vm/web-02" in out, out
+        apply()
+        assert inst("web-02")["config"]["limits.memory"] == "256MiB"
+
+    with subtest("a protected VM is not deleted; deleting needs --allow-delete and keeps data"):
+        commit({"host.nix": "${hostV4}"}, message="v4")
+        hv01.succeed(config("sync"))
+        apply()
+        assert inst("web-01")["config"]["user.strata.protected"] == "true"
+        commit({"host.nix": "${hostV5}"}, message="v5")
+        out = hv01.succeed(config("sync"))
+        assert "delete          vm/web-02" in out and "keeps data volume vmpool/web-02-data" in out, out
+        out = hv01.fail(config(f"apply --plan {plan_id()} --yes") + " 2>&1")
+        assert "add --allow-delete" in out, out
+        apply("--allow-delete")
+        hv01.fail("incus query '/1.0/instances/web-02?project=strata'")
+        hv01.succeed("incus storage volume show vmpool web-02-data --project strata")
+        # web-01 is protected: removing it from the configuration would not delete it.
+        assert inst("web-01")["status"] == "Stopped"
+
+    with subtest("a VM created with strata vm is adopted"):
+        hv01.succeed(
+            "echo '{\"apiVersion\":\"vm.strata.dev/v1alpha1\",\"name\":\"cli-vm\",\"resources\":{\"cpu\":1,\"memory\":\"256MiB\"},"
+            "\"disks\":[{\"name\":\"root\",\"size\":\"1GiB\",\"pool\":\"vmpool\"}]}' > /tmp/cli-vm.json && chmod 644 /tmp/cli-vm.json",
+            "su strata-admin -c 'strata vm create -f /tmp/cli-vm.json'",
+        )
+        commit({"host.nix": "${hostV6}"}, message="v6")
+        out = hv01.succeed(config("sync"))
+        assert "unreconcilable  vm/cli-vm" in out, out
+        hv01.succeed(config("adopt cli-vm"))
+        assert inst("cli-vm")["config"]["user.strata.owner"] == "gitops"
+        out = hv01.succeed(config("plan"))
+        assert "vm/cli-vm" in out.split("In sync:")[1], out
+
+    with subtest("pin rolls back to a signed commit; unpin follows the branch again"):
+        v6 = as_git("git -C ~/work rev-parse HEAD").strip()
+        v7 = commit({"host.nix": "${hostV7}"}, message="v7")
+        hv01.succeed(config("sync"))
+        apply()
+        assert inst("web-01")["config"]["boot.autostart"] == "true"
+        out = hv01.succeed(config(f"pin {v6[:10]}"))
+        assert f"Pinned:       {v6}" in out, out
+        apply()
+        assert inst("web-01")["config"]["boot.autostart"] == "false"
+        v8 = commit({"host.nix": "${hostV8}"}, message="v8")
+        hv01.succeed(config("sync"))
+        st = status()
+        assert st["head"] == v8 and st["evaluated"] == v6 and st["lastApplied"] == v6, st
+        hv01.succeed(config("unpin"))
+        assert status()["evaluated"] == v8
+        apply()
+        assert inst("web-01")["config"]["boot.autostart"] == "true" and inst("cli-vm")["config"]["limits.cpu"] == "2"
+        kinds = [d["kind"] for d in json.loads(hv01.succeed(config("history --json")))]
+        assert "pin" in kinds and "unpin" in kinds and "adopt" in kinds, kinds
+
+    with subtest("with autoApply = safe, safe plans apply by themselves; deletions wait"):
+        base = hv01.succeed("readlink -f /run/current-system").strip()
+        hv01.succeed(f"{base}/specialisation/auto/bin/switch-to-configuration test")
+        hv01.wait_for_unit("strata-controller.service")
+        commit({"host.nix": "${hostV9}"}, message="v9")
+        hv01.wait_until_succeeds("incus query '/1.0/instances/web-03?project=strata' | jq -e '.config[\"user.strata.owner\"] == \"gitops\"'", timeout=180)
+        # The VM exists before the deployment has verified it.
+        hv01.wait_until_succeeds(config("history --json") + " | jq -e '.[0].approvedBy == \"auto\" and .[0].state == \"SUCCEEDED\"'", timeout=120)
+        force_stop("web-03")
+        commit({"host.nix": "${hostV8}"}, message="v10")  # removes web-03
+        hv01.succeed(config("sync"))
+        st = status()
+        assert st["plan"]["deletes"] and st["awaiting"]["planId"] == st["plan"]["id"], st
+        hv01.succeed("incus query '/1.0/instances/web-03?project=strata'")  # not deleted
+
+    with subtest("old records are pruned to keepDeployments"):
+        records = hv01.succeed("ls /var/lib/strata-controller/deployments").split()
+        finished = [r for r in records if json.loads(hv01.succeed(f"cat /var/lib/strata-controller/deployments/{r}"))["state"] in ("SUCCEEDED", "FAILED", "CANCELLED")]
+        assert len(finished) <= 3, records
+
+    with subtest("after a reboot the state and history are kept"):
+        last = status()["lastApplied"]
+        hv01.shutdown()
+        hv01.start()
+        hv01.wait_for_unit("strata-controller.service")
+        st = status()
+        assert st["lastApplied"] == last and st.get("pinned") is None, st
+        assert json.loads(hv01.succeed(config("history --json"))), "history lost"
 
     with subtest("requests are audited; nothing failed"):
         uid = hv01.succeed("id -u strata-admin").strip()

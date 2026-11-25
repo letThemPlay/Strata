@@ -118,9 +118,9 @@ today:
 | `internal/planner` | Node plans: desired IR vs. observed VMs and host (ADR-0024) |
 | `internal/reconciler` | Applies approved plans through a provider and verifies convergence (ADR-0024) |
 | `internal/gitops` | The configuration repository: fetch with `git`, signature and fast-forward checks (ADR-0025) |
-| `internal/agent/client` | Client of the agent's local API (`strata vm`, the controller) |
+| `internal/agent/client` | Client of the agent's local API (`strata vm`, the controller), and the reconciler's provider over it (ADR-0026) |
 | `internal/configcli` | `strata config` |
-| `internal/controller`, `cmd/strata-controller` | The controller: synchronization, evaluation service, plans, its local API; `validate-ir` (ADR-0025) |
+| `internal/controller`, `cmd/strata-controller` | The controller: synchronization, evaluation service, plans, deployments and their records, pin/unpin, adoption, its local API; `validate-ir` (ADR-0025, ADR-0026) |
 | `docs/` | Development, administration and installation documentation |
 | `.github/workflows/` | CI |
 
@@ -155,8 +155,8 @@ Planned (not yet created):
 | NAT/routed guest networks; bonds | Planned (later) |
 | `strata.workloads.vms` and the IR `ir.strata.dev/v1alpha1` (`config.strata.ir`, `strata-controller validate-ir`); not applied yet | **Implemented** (M3 slice 1, experimental; ADR-0023) |
 | Planner and reconciler (`internal/planner`, `internal/reconciler`; tested against a mock provider), VM owner and protection, drift reporting, `strata vm` refusing Git-owned VMs | **Implemented** (M3 slice 2, experimental; ADR-0024); not yet driven by Git |
-| `strata.gitops`: the controller follows a signed Git repository, evaluates it without network and plans (`strata config status/sync/plan`); does not apply yet | **Implemented** (M3 slice 3a, experimental; ADR-0025) |
-| Applying plans from Git, deployment records, pin/unpin, adoption | Planned (M3 slice 3b) |
+| `strata.gitops`: the controller follows a signed Git repository, evaluates it without network and plans (`strata config status/sync/plan`) | **Implemented** (M3 slice 3a, experimental; ADR-0025) |
+| Applying approved plans from Git (`strata config apply`, `--allow-delete`), deployment records and history (optional pruning), `autoApply = "safe"`, pin/unpin, adoption | **Implemented** (M3 slice 3b, experimental; ADR-0026) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
 | Clustering | Planned (M6) |
@@ -328,7 +328,8 @@ Slices:
      server (ADR-0025). **Done.**
    - 3b: the controller's identity in the agent, approval and applying,
      deployment records (kept, with optional pruning), automatic
-     application of safe plans, pin/unpin, adoption, history.
+     application of safe plans, pin/unpin, adoption, history (ADR-0026).
+     **Done.**
 4. Validation on physical hardware.
 
 
@@ -1210,4 +1211,71 @@ Slices:
   deploy key. Host changes still go through `nixos-rebuild`. Webhooks are
   not supported in M3 (they need a network listener, M5). Slice 3b adds
   applying, deployment records (with optional pruning), automatic
-  application of safe plans, pinning and adoption.
+  application of safe plans, pinning and adoption (ADR-0026).
+
+### ADR-0026: Applying plans from Git, and deployment records
+
+- **Context:** M3 decisions 4–7: approval by plan ID with an opt-in
+  automatic application of safe plans, deletions only with approval (data
+  volumes kept), owner labels with explicit adoption, records in files
+  until PostgreSQL (M5). CLAUDE.md §8 lists what every deployment records;
+  §9 the operation states and that success is reported only once verified.
+  ADR-0024 left the controller's identity in the agent to this slice.
+- **Decision:**
+  - **The controller's identity.** The agent is started with
+    `--controller-user strata-controller` when `strata.gitops` is enabled
+    and recognises the controller by the peer uid of the socket
+    connection. Only the controller may create VMs owned by Git
+    (`?owner=gitops`, optionally `protected=true`), restore a VM, change a
+    VM's owner or protection (`PUT /vms/{name}/meta`), and update or
+    delete Git-owned VMs. `strata vm` (any other member of
+    `strata-operators`) keeps the lifecycle actions. The controller
+    applies plans through `client.Provider`, the reconciler's provider
+    over the agent's API (each call an agent operation, awaited).
+  - **Records.** Every new plan with changes is recorded as a deployment
+    `AWAITING_APPROVAL`; a plan that replaces it (a new commit, or a change
+    on the node) cancels it (`CANCELLED`), so an approval always names the
+    plan shown. Approval (`POST /config/apply {planId, allowDelete}`)
+    moves it through `PENDING`, `VALIDATING` (still the evaluated commit,
+    still signed, still a descendant of the last applied one),
+    `PLANNING` (the plan ID is unchanged), `APPLYING` and `VERIFYING`
+    (reconciler phases) to `SUCCEEDED` or `FAILED`. The record becomes
+    final only after the controller has planned again, so a client that
+    sees it finished also sees the current plan. One deployment runs at a
+    time; sync, pin, unpin and adoption wait or are refused while it does.
+    A record holds the repository, branch, node, commit, signer,
+    `flake.lock` blob, Strata and IR generator versions, the plan, the
+    approver (`uid:N` or `auto`), each transition with its time, each
+    item's result (with kept data volumes) and the error. Pin, unpin and
+    adoption are recorded too, as their own kinds.
+  - **Storage.** One JSON file per record in
+    `/var/lib/strata-controller/deployments` (written atomically; IDs are
+    time-sortable, `YYYYMMDDTHHMMSSZ-xxxxxx`, and validated before use as
+    file names), plus `state.json` (last applied and pinned commits). All
+    records are kept by default; `keepDeployments = N` keeps the newest N
+    finished ones and never removes records awaiting approval or in
+    progress.
+  - **Restart.** A record found in progress when the controller starts is
+    marked `FAILED` ("interrupted"): the reconciler is idempotent and the
+    next plan shows what is left. A record awaiting approval is cancelled;
+    the next synchronization records a fresh one.
+  - **Deletion** needs `allowDelete` in the approval (the CLI's
+    `--allow-delete`), also with `autoApply`: a plan that deletes,
+    restarts, restores or has unreconcilable items is never applied
+    automatically (`Plan.Safe()`), it waits for approval.
+  - **Pinning** (`strata config pin COMMIT`) evaluates a fetched commit
+    instead of the branch head: it must be signed by a trusted key but may
+    be older than the last applied commit, which makes it the rollback that
+    does not write to the repository. While pinned, the branch is fetched
+    but not planned. `unpin` returns to the branch, whose head must then
+    descend from the last applied commit.
+  - **Adoption** (`strata config adopt NAME`) changes only the owner of a
+    VM created with `strata vm`, and only if it is declared in the
+    evaluated commit and has not drifted; the next plan shows any
+    difference from its declaration.
+- **Consequences:** a force-pushed branch stops the controller until a
+  commit is pushed on top of the last applied one or a commit is pinned.
+  An approval can fail as stale when the node changes in between; nothing
+  is applied then. Records live on the node and are lost with it until
+  PostgreSQL (M5). Approvals are tied to local uids until the management
+  API brings accounts (M5).

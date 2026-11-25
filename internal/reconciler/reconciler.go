@@ -47,10 +47,19 @@ var (
 	ErrNotConverged = errors.New("the node did not converge")
 )
 
+// Phases reported through Options.OnPhase.
+const (
+	PhaseApplying  = "applying"
+	PhaseVerifying = "verifying"
+)
+
 // Options control how plans are applied.
 type Options struct {
 	// StopTimeout is how long a graceful stop may take (seconds).
 	StopTimeout int
+	// OnPhase, if set, is called when applying starts ("applying") and
+	// when the result is verified ("verifying").
+	OnPhase func(phase string)
 }
 
 // ItemResult is what happened to one plan item.
@@ -114,6 +123,12 @@ func Apply(ctx context.Context, p Provider, doc *ir.Document, planID string, opt
 	if plan.ID != planID {
 		return Result{}, fmt.Errorf("%w: plan %s was approved, the node's plan is now %s; plan and approve again", ErrStale, planID, plan.ID)
 	}
+	report := func(p string) {
+		if opt.OnPhase != nil {
+			opt.OnPhase(p)
+		}
+	}
+	report(PhaseApplying)
 	res := Result{PlanID: planID, Items: []ItemResult{}}
 	specs := map[string]workload.VM{}
 	for _, r := range doc.Resources {
@@ -147,6 +162,7 @@ func Apply(ctx context.Context, p Provider, doc *ir.Document, planID string, opt
 		return res, failure
 	}
 
+	report(PhaseVerifying)
 	after, err := Plan(ctx, p, doc)
 	if err != nil {
 		return res, fmt.Errorf("verify: %w", err)

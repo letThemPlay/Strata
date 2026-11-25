@@ -631,12 +631,30 @@ let
       && gconf.branch == "main"
       && gconf.intervalSeconds == 300
       && gconf.autoApply == "none"
+      && !(gconf ? keepDeployments)
       && gconf.trustedSigners == [ signer ]
       && lib.hasPrefix "/nix/store/" gconf.knownHostsFile;
     "gitops: the flake inputs are kept in the store only when enabled" =
       lib.elem nixpkgs.outPath gitops.config.system.extraDependencies
       && lib.elem self.outPath gitops.config.system.extraDependencies
       && !(lib.elem self.outPath (hostWith [ static ]).config.system.extraDependencies);
+    "gitops: automatic application and record pruning" =
+      let
+        s =
+          (gitopsWith (
+            sshGitops
+            // {
+              autoApply = "safe";
+              keepDeployments = 50;
+            }
+          )).config.strata.gitops.settings;
+      in
+      s.autoApply == "safe" && s.keepDeployments == 50;
+    "gitops: the agent knows the controller" =
+      lib.hasInfix "--controller-user strata-controller" gitops.config.systemd.services.strata-agent.serviceConfig.ExecStart
+      && !(lib.hasInfix "--controller-user"
+        (hostWith [ static ]).config.systemd.services.strata-agent.serviceConfig.ExecStart
+      );
     "gitops: an https repository with a token" =
       let
         h = gitopsWith {

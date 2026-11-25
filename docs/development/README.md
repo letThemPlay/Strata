@@ -11,7 +11,7 @@ nix develop
 
 The shell provides: `go`, `gopls`, `gotools`, `gofumpt`, `golangci-lint`,
 `make`, `git`, `nixfmt`, `statix`, `deadnix`, `actionlint`, `shellcheck`,
-`govulncheck`. It sets `GOTOOLCHAIN=local` so
+`govulncheck`, `jq`. It sets `GOTOOLCHAIN=local` so
 Go never downloads a different toolchain.
 
 Optional: with direnv, create an untracked `.envrc` containing `use flake`.
@@ -26,6 +26,7 @@ Optional: with direnv, create an untracked `.envrc` containing `use flake`.
 | `make fmt-check` | Fail if anything is unformatted |
 | `make lint` | golangci-lint, statix, deadnix, actionlint (workflows) |
 | `make vulncheck` | govulncheck with the pinned Go toolchain; fails on called vulnerabilities not in `.govulncheck-allow` (needs network) |
+| `make ir-golden` | Regenerates `internal/ir/testdata/standalone.json`, the IR of `examples/standalone` |
 | `make build` | Build binaries into `./bin` with version metadata |
 | `make nix-check` | `nix flake check`: every check, including the VM tests |
 | `make nix-check-novm` | Evaluates every check and builds all but the VM tests (what CI runs) |
@@ -42,7 +43,7 @@ Optional: with direnv, create an untracked `.envrc` containing `use flake`.
 | `nix-fmt` | nixfmt formatting of all `.nix` files |
 | `nix-lint` | statix and deadnix |
 | `actions-lint` | actionlint (with shellcheck) on `.github/workflows` |
-| `examples` | Evaluates `examples/standalone/strata.nix` and checks its structure |
+| `examples` | Evaluates `examples/standalone/host.nix` with the Strata modules, validates its IR with `strata-controller validate-ir` and requires it to equal `internal/ir/testdata/standalone.json` (regenerate with `make ir-golden`) |
 | `module-eval` | Evaluates NixOS configurations using the Strata modules: option validation, assertions, generated config |
 | `nixos-agent` | NixOS VM test: boots a host with the agent and checks identity, hardware report, privileges, reload and shutdown (needs KVM) |
 | `nixos-host` | NixOS VM test with three nodes: admin SSH and sudo, refused password/root logins, firewall isolation of the management services, node exporter, Incus without networks, KVM (needs KVM) |

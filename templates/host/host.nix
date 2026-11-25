@@ -53,5 +53,16 @@
     #     devices = [ "/dev/disk/by-id/nvme-..." ];
     #   };
     # };
+
+    # Virtual machines (M3, experimental: declared and validated here, not
+    # applied yet; use `strata vm` meanwhile). See
+    # docs/administration/workloads.md.
+    # workloads.vms.web-01 = {
+    #   resources = { cpu = 2; memory = "2GiB"; };
+    #   image = "debian-13";
+    #   disks.root.size = "20GiB";
+    #   networks.eth0.network = "lan";
+    #   autostart = true;
+    # };
   };
 }

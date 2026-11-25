@@ -1,0 +1,149 @@
+{
+  "apiVersion": "ir.strata.dev/v1alpha1",
+  "generator": {
+    "strataVersion": "0.1.0-dev"
+  },
+  "host": {
+    "defaultPool": "fast",
+    "imageServers": [
+      "images.linuxcontainers.org"
+    ],
+    "limits": {
+      "cpu": 16,
+      "instances": 20,
+      "memory": "64GiB"
+    },
+    "networks": [
+      {
+        "name": "dmz"
+      },
+      {
+        "name": "lan"
+      }
+    ],
+    "pools": [
+      {
+        "driver": "lvm",
+        "name": "bulk"
+      },
+      {
+        "driver": "zfs",
+        "name": "fast"
+      }
+    ],
+    "project": "strata"
+  },
+  "node": "hv-01",
+  "resources": [
+    {
+      "dependsOn": [
+        "network/dmz",
+        "network/lan",
+        "pool/bulk",
+        "pool/fast"
+      ],
+      "id": "vm/db-01",
+      "lifecycle": {
+        "protected": true
+      },
+      "spec": {
+        "apiVersion": "vm.strata.dev/v1alpha1",
+        "autostart": true,
+        "disks": [
+          {
+            "name": "root",
+            "pool": "fast",
+            "size": "20GiB"
+          },
+          {
+            "name": "data",
+            "pool": "bulk",
+            "size": "200GiB"
+          }
+        ],
+        "image": "debian-13",
+        "name": "db-01",
+        "networks": [
+          {
+            "name": "eth0",
+            "network": "lan"
+          },
+          {
+            "name": "eth1",
+            "network": "dmz"
+          }
+        ],
+        "resources": {
+          "cpu": 4,
+          "memory": "8GiB"
+        }
+      },
+      "type": "vm"
+    },
+    {
+      "dependsOn": [
+        "pool/fast"
+      ],
+      "id": "vm/scratch",
+      "lifecycle": {
+        "protected": false
+      },
+      "spec": {
+        "apiVersion": "vm.strata.dev/v1alpha1",
+        "disks": [
+          {
+            "name": "root",
+            "pool": "fast",
+            "size": "10GiB"
+          }
+        ],
+        "name": "scratch",
+        "resources": {
+          "cpu": 1,
+          "memory": "1GiB"
+        }
+      },
+      "type": "vm"
+    },
+    {
+      "dependsOn": [
+        "network/dmz",
+        "pool/fast"
+      ],
+      "id": "vm/web-01",
+      "lifecycle": {
+        "protected": false
+      },
+      "spec": {
+        "apiVersion": "vm.strata.dev/v1alpha1",
+        "autostart": true,
+        "cloudInit": {
+          "sshAuthorizedKeys": [
+            "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl admin@example"
+          ]
+        },
+        "disks": [
+          {
+            "name": "root",
+            "pool": "fast",
+            "size": "20GiB"
+          }
+        ],
+        "image": "debian/13/cloud",
+        "imageServer": "images.linuxcontainers.org",
+        "name": "web-01",
+        "networks": [
+          {
+            "name": "eth0",
+            "network": "dmz"
+          }
+        ],
+        "resources": {
+          "cpu": 2,
+          "memory": "2GiB"
+        }
+      },
+      "type": "vm"
+    }
+  ]
+}

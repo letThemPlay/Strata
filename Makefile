@@ -76,6 +76,11 @@ nix-check: ## Run `nix flake check` (all checks, including the VM tests)
 NIX_SYSTEM = $(shell nix eval --impure --raw --expr builtins.currentSystem)
 CHECK_NAMES = nix eval --raw .\#checks.$(NIX_SYSTEM) --apply 'c: builtins.concatStringsSep " " (builtins.attrNames c)'
 
+.PHONY: ir-golden
+ir-golden: ## Regenerate internal/ir/testdata/standalone.json from examples/standalone
+	@ir=$$(nix build --no-link --print-out-paths .\#checks.$(NIX_SYSTEM).examples.ir); \
+	jq -S . "$$ir" > internal/ir/testdata/standalone.json
+
 .PHONY: nix-check-novm
 nix-check-novm: ## Evaluate all checks; build all except the VM tests (what CI runs)
 	nix flake check --all-systems --no-build

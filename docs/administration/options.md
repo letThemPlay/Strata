@@ -218,6 +218,28 @@ network exists; guest networks require `strata.compute` and
 (`21-strata-guest-vlans`), and guest bridges are exempt from the
 reverse-path filter.
 
+## Workloads
+
+Declared VMs, applied by the Strata controller from Git (M3; not applied
+yet). Their IR is `config.strata.ir`. See [workloads](workloads.md).
+
+| Option | Type | Default | Description |
+|---|---|---|---|
+| `strata.workloads.vms.<name>.resources.cpu` | 1–256 | required | Virtual CPUs. |
+| `strata.workloads.vms.<name>.resources.memory` | size | required | Memory, at least `128MiB`. |
+| `strata.workloads.vms.<name>.image` | null or string | `null` | Local image alias, or with `imageServer` an alias on that server. `null`: an empty VM. Only used at creation. |
+| `strata.workloads.vms.<name>.imageServer` | null or host name | `null` | Image server; must be in `strata.compute.incus.imageServers`. |
+| `strata.workloads.vms.<name>.disks.<disk>.size` | size | required | Disk size; `root` (required, at least `1GiB`) is the boot disk, others are data volumes `<name>-<disk>`. |
+| `strata.workloads.vms.<name>.disks.<disk>.pool` | null or pool name | `null` | Pool; `null`: `strata.storage.defaultPool`. |
+| `strata.workloads.vms.<name>.networks.<nic>.network` | network name | required | Guest network of interface `<nic>`. |
+| `strata.workloads.vms.<name>.autostart` | bool | `false` | Start with the host. |
+| `strata.workloads.vms.<name>.cloudInit.sshAuthorizedKeys` | list of strings | `[ ]` | SSH keys for cloud-init. Only used at creation. |
+| `strata.workloads.vms.<name>.lifecycle.protected` | bool | `false` | Never deleted or restarted by Strata until cleared and applied. |
+| `strata.ir` | read-only | | The IR (`ir.strata.dev/v1alpha1`) of the declared workloads. |
+
+Sizes are a number followed by `B`, `KiB`, `MiB`, `GiB` or `TiB`. The checks
+at evaluation are listed in the [workloads guide](workloads.md#what-is-checked).
+
 ## Disk
 
 | Option | Type | Default | Description |

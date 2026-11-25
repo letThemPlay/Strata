@@ -94,7 +94,6 @@ today:
 | `cmd/strata` | CLI client: `strata vm` (local agent API) |
 | `cmd/strata-api` | Management API server (`version`/`help` only) |
 | `cmd/strata-agent` | Node agent: `run` (discovery, backend status, local API), `discover` |
-| `cmd/strata-controller` | Control-plane controller (`version`/`help` only) |
 | `cmd/strata-install` | Host installer: `plan`, `apply` |
 | `internal/version` | Build metadata injected via `-ldflags` |
 | `internal/cli` | Shared, testable entrypoint and subcommand dispatch |
@@ -108,19 +107,20 @@ today:
 | `internal/blockdev` | Block device inspection (procfs, sysfs, udev database): resolution, signatures, uses, system disks; shared by the installer and pool setup |
 | `internal/hostsetup`, `cmd/strata-host` | Root-only Incus setup run by NixOS: project, agent identity and trust, storage pools |
 | `nix/packages/` | Package definitions (`strata`) |
-| `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring`, `disk` |
+| `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring`, `disk`, `storage`, `workloads` |
 | `nix/hosts/` | Test values completing the host template into the reference host |
 | `installer/partitioning/` | disko layouts used by `strata.disk` |
 | `installer/iso/` | Installer ISO (NixOS module) and the host `flake.lock` it ships |
 | `templates/host/` | Flake template for a host configuration repository |
 | `nix/tests/` | Nix evaluation tests and NixOS VM tests (`nixos/`) |
-| `examples/standalone/` | Non-normative sample infrastructure configuration |
+| `examples/standalone/` | Example host with declared workloads (its IR is checked by the `examples` check) |
+| `internal/ir` | The IR (`ir.strata.dev/v1alpha1`): parsing and validation |
+| `internal/controller`, `cmd/strata-controller` | Control plane; currently `validate-ir` |
 | `docs/` | Development, administration and installation documentation |
 | `.github/workflows/` | CI |
 
 Planned (not yet created):
-`internal/{networking,...}` (later), `internal/{gitops,schema,
-planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
+`internal/{networking,...}` (later), `internal/{gitops,planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 `internal/cluster` (M6).
 
 ## Current status
@@ -148,7 +148,8 @@ planner,reconciler,executor}` (M3), `api/openapi`, `web/` (M5),
 | VM schema `vm.strata.dev/v1alpha1`; `strata vm create/list/show/start/stop/restart/update/delete` through the agent's local API (operations, verification, audit; plans confirmed by ID; deletion keeps data volumes); image server allow-list | **Implemented** (M2 slices 4a–4b, experimental; ADR-0020, ADR-0021) |
 | M2 acceptance on physical hardware | **Passed** (GMKtec M6 Ultra, AMD; see [results](docs/installation/hardware-validation.md#m2-results)) |
 | NAT/routed guest networks; bonds | Planned (later) |
-| GitOps, IR, planner, reconciler | Planned (M3) |
+| `strata.workloads.vms` and the IR `ir.strata.dev/v1alpha1` (`config.strata.ir`, `strata-controller validate-ir`); not applied yet | **Implemented** (M3 slice 1, experimental; ADR-0023) |
+| GitOps, planner, reconciler | Planned (M3 slices 2–3) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
 | Clustering | Planned (M6) |
@@ -269,6 +270,55 @@ Known limitations at the end of M2:
   proposed).
 - The first ZFS pool on a host needs a reboot after the rebuild.
 
+## M3 plan
+
+M3 ("Git changes generate safe and repeatable infrastructure changes")
+puts a declarative engine in front of the M2 execution path:
+
+```
+Git remote --fetch (read-only)--> strata-controller --Unix socket--> strata-agent --restricted TLS--> Incus
+                                   verify signature, nix eval -> IR,
+                                   validate, plan, approve, record
+strata config ... (CLI) --Unix socket--^
+```
+
+Decisions taken for the milestone (each gets an ADR in the slice that
+implements it):
+
+1. Workloads are declared in the host flake (`strata.workloads.*`); the IR
+   is `nixosConfigurations.<node>.config.strata.ir`. A workload-only commit
+   leaves `flake.lock` alone, so evaluation needs no network. To be
+   revisited when the cluster is designed (M6).
+2. `strata-controller` is a separate unprivileged service with its own
+   socket; it reaches workloads only as a client of the agent.
+3. Only commits signed by an allowed key are evaluated, and the tracked
+   branch must only move forward from the last applied commit.
+4. Every plan needs approval by default (by plan ID); an opt-in
+   `autoApply = "safe"` covers plans without restarts or deletions.
+   Deletions always need approval.
+5. A VM removed from the configuration is deleted only with approval; data
+   volumes are always kept.
+6. VMs carry an owner (`gitops` or `cli`); the engine manages only its own,
+   adoption is explicit, and the agent refuses `strata vm update/delete` on
+   Git-managed VMs.
+7. Deployment records and plans are JSON files until PostgreSQL arrives
+   with the API server (M5).
+8. Git is accessed with the `git` binary (fixed arguments, no shell), into a
+   bare repository; Nix evaluates from `git+file://...?rev=<sha>`.
+
+Slices:
+
+1. The IR and the Nix side: `strata.workloads.vms`, `config.strata.ir`,
+   `internal/ir`, `strata-controller validate-ir` (ADR-0023). **Done.**
+2. Planning and reconciliation against a mock provider: a plan across all
+   VMs (create, update, delete, unreconcilable, drift), owner labels,
+   adoption.
+3. The controller: Git sync with signature and fast-forward checks,
+   sandboxed evaluation, approval, execution through the agent, deployment
+   records, `strata.gitops`, `strata config`, VM test with a Git server.
+4. Validation on physical hardware.
+
+
 ## Architecture decision records
 
 ### ADR-0001: Lowercase binary names and NixOS option namespace
@@ -310,6 +360,9 @@ Known limitations at the end of M2:
 
 ### ADR-0005: Sample configuration is non-normative until M3
 
+- **Status:** superseded by ADR-0023 (M3): the example is now a host
+  configuration with declared workloads, and the `examples` check validates
+  its IR.
 - **Decision:** `examples/standalone/strata.nix` is a plain attribute set that
   illustrates the intended configuration shape. It is not a NixOS module and
   no code consumes it. `nix/tests/examples.nix` only checks structure and
@@ -1005,3 +1058,46 @@ Known limitations at the end of M2:
   configuration cannot express (Dependabot alerts, secret scanning with
   push protection, private vulnerability reporting, CodeQL default setup
   left off) are listed in `docs/development/README.md`.
+
+### ADR-0023: The intermediate representation
+
+- **Context:** the Go backend must not interpret Nix (CLAUDE.md §7.2), and
+  workloads are declared in the host's NixOS configuration (M3 decision 1).
+  The controller needs a stable, versioned description of the desired
+  workloads that it can validate on its own and plan from.
+- **Decision:**
+  - VMs are declared as `strata.workloads.vms.<name>`, whose fields map one
+    to one onto `vm.strata.dev/v1alpha1`. Disks and interfaces are
+    attribute sets keyed by name; in the spec `root` comes first, then the
+    other disks and the interfaces in name order. Unset disk pools resolve
+    to `strata.storage.defaultPool`.
+  - `config.strata.ir` is the IR, `ir.strata.dev/v1alpha1`: the generator
+    (Strata version), the node, the host context (Incus project, pools
+    with drivers, default pool, guest networks, allowed image servers,
+    project limits) and the resources. A resource has a stable ID
+    (`TYPE/NAME`), a type (`vm`), its dependencies (exactly the host
+    objects its spec uses, sorted), a lifecycle policy (`protected`) and
+    its spec in the workload's own schema, so the VM schema is not
+    duplicated.
+  - The IR holds desired state only. Its source (repository, commit,
+    flake.lock) is recorded by the controller around it, because pure
+    evaluation of a NixOS configuration cannot reliably see it.
+  - The output is deterministic: sorted keys and lists, no timestamps.
+    The same configuration always gives the same bytes, so plan IDs
+    derived from it are stable.
+  - Nix checks structure and references to the declared host objects as
+    assertions, which also fail `nixos-rebuild`, and evaluating the IR
+    fails if any assertion of the configuration fails. Go
+    (`internal/ir`, `strata-controller validate-ir`) validates everything
+    again, rejects unknown fields and versions, and is the authority on
+    the VM schema; detailed formats (SSH keys, image aliases) are checked
+    in Go only.
+  - Dependencies are only on host objects in M3, so there is no ordering
+    to resolve; a topological order arrives with dependencies between
+    resources (M4).
+- **Consequences:** the `examples` check ties the two sides together: it
+  evaluates `examples/standalone/host.nix`, validates the IR with
+  `strata-controller validate-ir` and requires it to equal
+  `internal/ir/testdata/standalone.json`, which the Go tests parse. An
+  invalid workload blocks host rebuilds until it is fixed. The IR is per
+  node; a cluster layer (M6) can produce it. Supersedes ADR-0005.

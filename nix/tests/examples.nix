@@ -1,59 +1,48 @@
-# Evaluation test for the sample configurations in ./examples.
-#
-# This is a structural smoke test only: it asserts that each example
-# evaluates and that references between resources are consistent. It is not
-# a schema validator; schema validation belongs to the M3 IR work.
-{ pkgs, lib }:
+# The examples check: evaluates examples/standalone/host.nix with the
+# Strata modules, validates the IR it produces with `strata-controller
+# validate-ir`, and requires it to equal internal/ir/testdata/standalone.json,
+# which the Go tests parse too. Changing the Nix or the Go side of the IR
+# alone therefore fails here. Regenerate the golden file with
+# `make ir-golden`.
+{
+  self,
+  nixpkgs,
+  pkgs,
+}:
 let
-  sample = import ../../examples/standalone/strata.nix;
-
-  workloads = lib.attrValues sample.workloads;
-
-  checks = [
-    {
-      msg = "top-level keys must be exactly node, storage, networks, workloads";
-      ok =
-        lib.attrNames sample == [
-          "networks"
-          "node"
-          "storage"
-          "workloads"
-        ];
-    }
-    {
-      msg = "node.id must be a non-empty string";
-      ok = lib.isString sample.node.id && sample.node.id != "";
-    }
-    {
-      msg = "every workload type must be one of vm, lxc, oci";
-      ok = lib.all (
-        w:
-        lib.elem w.type [
-          "vm"
-          "lxc"
-          "oci"
-        ]
-      ) workloads;
-    }
-    {
-      msg = "every disk must reference a declared storage pool";
-      ok = lib.all (w: lib.all (d: sample.storage.pools ? ${d.storage}) (w.disks or [ ])) workloads;
-    }
-    {
-      msg = "every network attachment must reference a declared network";
-      ok = lib.all (w: lib.all (n: sample.networks ? ${n.bridge}) (w.networking or [ ])) workloads;
-    }
-    {
-      msg = "VLAN IDs must be in range 1-4094";
-      ok = lib.all (
-        w: lib.all (n: !(n ? vlan) || (n.vlan >= 1 && n.vlan <= 4094)) (w.networking or [ ])
-      ) workloads;
-    }
-  ];
-
-  failures = lib.filter (c: !c.ok) checks;
+  example = nixpkgs.lib.nixosSystem {
+    modules = [
+      self.nixosModules.default
+      ../../examples/standalone/host.nix
+      {
+        nixpkgs.hostPlatform = pkgs.stdenv.hostPlatform.system;
+        boot.loader.grub.enable = false;
+        fileSystems."/" = {
+          device = "/dev/null";
+          fsType = "ext4";
+        };
+        system.stateVersion = "26.05";
+      }
+    ];
+  };
+  ir = pkgs.writeText "standalone-ir.json" (builtins.toJSON example.config.strata.ir);
+  strata = self.packages.${pkgs.stdenv.hostPlatform.system}.strata;
 in
-assert lib.assertMsg (failures == [ ]) (
-  "examples/standalone/strata.nix: " + lib.concatMapStringsSep "; " (c: c.msg) failures
-);
-pkgs.writeText "strata-example-standalone.json" (builtins.toJSON sample)
+pkgs.runCommand "strata-examples"
+  {
+    nativeBuildInputs = [
+      strata
+      pkgs.jq
+      pkgs.diffutils
+    ];
+    passthru = { inherit ir; };
+  }
+  ''
+    strata-controller validate-ir ${ir}
+    jq -S . ${ir} > ir.json
+    if ! diff -u ${../../internal/ir/testdata/standalone.json} ir.json; then
+      echo "The example's IR differs from internal/ir/testdata/standalone.json; run make ir-golden." >&2
+      exit 1
+    fi
+    cp ir.json $out
+  ''

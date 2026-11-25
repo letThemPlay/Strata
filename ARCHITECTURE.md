@@ -107,7 +107,7 @@ today:
 | `internal/blockdev` | Block device inspection (procfs, sysfs, udev database): resolution, signatures, uses, system disks; shared by the installer and pool setup |
 | `internal/hostsetup`, `cmd/strata-host` | Root-only Incus setup run by NixOS: project, agent identity and trust, storage pools |
 | `nix/packages/` | Package definitions (`strata`) |
-| `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring`, `disk`, `storage`, `workloads` |
+| `nix/modules/` | NixOS modules: `base`, `agent`, `compute`, `access`, `networking`, `monitoring`, `disk`, `storage`, `workloads`, `gitops` |
 | `nix/hosts/` | Test values completing the host template into the reference host |
 | `installer/partitioning/` | disko layouts used by `strata.disk` |
 | `installer/iso/` | Installer ISO (NixOS module) and the host `flake.lock` it ships |
@@ -117,12 +117,15 @@ today:
 | `internal/ir` | The IR (`ir.strata.dev/v1alpha1`): parsing and validation |
 | `internal/planner` | Node plans: desired IR vs. observed VMs and host (ADR-0024) |
 | `internal/reconciler` | Applies approved plans through a provider and verifies convergence (ADR-0024) |
-| `internal/controller`, `cmd/strata-controller` | Control plane; currently `validate-ir` |
+| `internal/gitops` | The configuration repository: fetch with `git`, signature and fast-forward checks (ADR-0025) |
+| `internal/agent/client` | Client of the agent's local API (`strata vm`, the controller) |
+| `internal/configcli` | `strata config` |
+| `internal/controller`, `cmd/strata-controller` | The controller: synchronization, evaluation service, plans, its local API; `validate-ir` (ADR-0025) |
 | `docs/` | Development, administration and installation documentation |
 | `.github/workflows/` | CI |
 
 Planned (not yet created):
-`internal/{networking,...}` (later), `internal/gitops` (M3), `api/openapi`, `web/` (M5),
+`internal/{networking,...}` (later), `api/openapi`, `web/` (M5),
 `internal/cluster` (M6).
 
 ## Current status
@@ -152,7 +155,8 @@ Planned (not yet created):
 | NAT/routed guest networks; bonds | Planned (later) |
 | `strata.workloads.vms` and the IR `ir.strata.dev/v1alpha1` (`config.strata.ir`, `strata-controller validate-ir`); not applied yet | **Implemented** (M3 slice 1, experimental; ADR-0023) |
 | Planner and reconciler (`internal/planner`, `internal/reconciler`; tested against a mock provider), VM owner and protection, drift reporting, `strata vm` refusing Git-owned VMs | **Implemented** (M3 slice 2, experimental; ADR-0024); not yet driven by Git |
-| GitOps controller (`strata config`) | Planned (M3 slice 3) |
+| `strata.gitops`: the controller follows a signed Git repository, evaluates it without network and plans (`strata config status/sync/plan`); does not apply yet | **Implemented** (M3 slice 3a, experimental; ADR-0025) |
+| Applying plans from Git, deployment records, pin/unpin, adoption | Planned (M3 slice 3b) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
 | Clustering | Planned (M6) |
@@ -317,9 +321,14 @@ Slices:
    VMs (create, update, restore, lifecycle, delete, unreconcilable), owner
    and protection labels, drift reported by the agent, `strata vm` refusing
    changes to Git-owned VMs (ADR-0024). **Done.**
-3. The controller: Git sync with signature and fast-forward checks,
-   sandboxed evaluation, approval, execution through the agent, deployment
-   records, `strata.gitops`, `strata config`, VM test with a Git server.
+3. The controller, in two parts:
+   - 3a: `strata.gitops` and the controller service, Git sync with
+     signature and fast-forward checks, evaluation in a service without
+     network, plans, `strata config status/sync/plan`, VM test with a Git
+     server (ADR-0025). **Done.**
+   - 3b: the controller's identity in the agent, approval and applying,
+     deployment records (kept, with optional pruning), automatic
+     application of safe plans, pin/unpin, adoption, history.
 4. Validation on physical hardware.
 
 
@@ -1153,3 +1162,52 @@ Slices:
   changes, and stays visible in every plan. Restoring a running VM always
   restarts it, even for a change that would not need it. Applying an
   unchanged configuration again does nothing.
+
+### ADR-0025: The controller: synchronization, trust and evaluation
+
+- **Context:** M3 decisions 1–3 and 8: workloads in the host flake,
+  evaluated without network; a separate unprivileged controller; only
+  signed, forward commits evaluated; Git through the `git` binary. CLAUDE.md
+  §8 and §17 require restricted Nix evaluation and an explicit repository
+  trust policy.
+- **Decision:**
+  - `strata.gitops` runs `strata-controller` as the static system user
+    `strata-controller` (in `strata-operators`, to reach the agent), with
+    its own socket `/run/strata/controller.sock` (group
+    `strata-operators`, 0660; caller uid authorized and audited as in the
+    agent). Credentials (an ssh deploy key or an https token) are files
+    outside the Nix store passed with `LoadCredential`; ssh host keys are
+    pinned with `knownHosts`.
+  - **Synchronization** (`internal/gitops`): `git` with fixed arguments and
+    no shell, without system or user configuration or prompts, only the
+    https and ssh protocols, no hooks; the branch is fetched into a bare
+    repository; the token is passed in the environment, never as an
+    argument.
+  - **Trust:** the commit to be evaluated must be signed by one of
+    `trustedSigners` (`git verify-commit`, SSH signatures); once a commit is
+    applied, later commits must descend from it (`merge-base
+    --is-ancestor`). Only the evaluated commit must be signed; the
+    fast-forward check covers its history. A commit that fails is never
+    evaluated.
+  - **Evaluation** runs in a separate service per request
+    (`strata-controller-eval@`, socket-activated, reachable only by the
+    controller) with **no network** (`PrivateNetwork`), a read-only view of
+    the repository, a memory limit and a timeout; `nix eval --offline`,
+    pure, without import-from-derivation and substitution. The first VM
+    test showed that `--offline` alone still let Nix try to download a
+    missing input; without a network it cannot. The service only evaluates
+    commits of the controller's repository.
+  - The host flake's inputs (Strata, nixpkgs, disko) are kept in the store
+    while the system generation exists (`system.extraDependencies`), so
+    evaluation works offline after garbage collection. A commit whose
+    inputs are not on the host (a changed `flake.lock`) is reported as a
+    host change to apply with `nixos-rebuild`.
+  - The controller plans an unchanged commit again on every
+    synchronization (every `interval`, and `strata config sync`), so drift
+    appears without a new commit; it keeps no plan for a commit other than
+    the head.
+- **Consequences:** a configuration repository needs commit signing and a
+  deploy key. Host changes still go through `nixos-rebuild`. Webhooks are
+  not supported in M3 (they need a network listener, M5). Slice 3b adds
+  applying, deployment records (with optional pruning), automatic
+  application of safe plans, pinning and adoption.

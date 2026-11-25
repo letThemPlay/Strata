@@ -255,6 +255,32 @@ let
   workloadFails = msg: args: hasFailure msg (workloadsWith args);
   oneVM = vm: { vms.vm1 = lib.recursiveUpdate vmBase vm; };
 
+  # ---- gitops ----
+  signer = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl alice";
+  gitopsWith =
+    g:
+    hostWith [
+      static
+      {
+        strata.gitops = {
+          enable = true;
+          trustedSigners = [ signer ];
+        }
+        // g;
+      }
+    ];
+  sshGitops = {
+    repository = "ssh://git@git.example.org/infra/hv-01.git";
+    sshKeyFile = "/etc/strata/gitops-key";
+    knownHosts = [
+      "git.example.org ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl"
+    ];
+  };
+  gitops = gitopsWith sshGitops;
+  gsvc = gitops.config.systemd.services.strata-controller;
+  gconf = gitops.config.strata.gitops.settings;
+  gitopsFails = msg: g: hasFailure msg (gitopsWith g);
+
   cases = {
     # ---- full host ----
     "full static host has no failed assertions" = failedAssertions host == [ ];
@@ -566,6 +592,96 @@ let
             };
           }
         ]);
+
+    # ---- gitops ----
+    "gitops: a valid ssh configuration has no failed assertions" = failedAssertions gitops == [ ];
+    "gitops: the controller runs as its own user, in strata-operators" =
+      gsvc.serviceConfig.User == "strata-controller"
+      && lib.elem "strata-operators" gitops.config.users.users.strata-controller.extraGroups
+      && gsvc.serviceConfig.CapabilityBoundingSet == ""
+      && gsvc.serviceConfig.NoNewPrivileges
+      && gsvc.serviceConfig.ProtectSystem == "strict";
+    "gitops: the API socket is for strata-operators only" =
+      let
+        s = gitops.config.systemd.sockets.strata-controller.socketConfig;
+      in
+      s.ListenStream == "/run/strata/controller.sock"
+      && s.SocketGroup == "strata-operators"
+      && s.SocketMode == "0660";
+    "gitops: evaluation runs without network, reachable only by the controller" =
+      let
+        e = gitops.config.systemd.services."strata-controller-eval@".serviceConfig;
+        s = gitops.config.systemd.sockets.strata-controller-eval.socketConfig;
+      in
+      e.PrivateNetwork
+      && e.RestrictAddressFamilies == [ "AF_UNIX" ]
+      && e.User == "strata-controller"
+      && e.ProtectSystem == "strict"
+      && s.Accept
+      && s.SocketUser == "strata-controller"
+      && s.SocketMode == "0600"
+      && !(lib.elem gitops.config.nix.package gsvc.path);
+    "gitops: the ssh key is a credential, not in the configuration" =
+      gsvc.serviceConfig.LoadCredential == [ "gitops-ssh-key:/etc/strata/gitops-key" ]
+      && gconf.sshKey == "gitops-ssh-key"
+      && !(lib.hasInfix "gitops-key" (builtins.toJSON (removeAttrs gconf [ "sshKey" ])));
+    "gitops: the controller configuration" =
+      gconf.node == "hv-01"
+      && gconf.repository == sshGitops.repository
+      && gconf.branch == "main"
+      && gconf.intervalSeconds == 300
+      && gconf.autoApply == "none"
+      && gconf.trustedSigners == [ signer ]
+      && lib.hasPrefix "/nix/store/" gconf.knownHostsFile;
+    "gitops: the flake inputs are kept in the store only when enabled" =
+      lib.elem nixpkgs.outPath gitops.config.system.extraDependencies
+      && lib.elem self.outPath gitops.config.system.extraDependencies
+      && !(lib.elem self.outPath (hostWith [ static ]).config.system.extraDependencies);
+    "gitops: an https repository with a token" =
+      let
+        h = gitopsWith {
+          repository = "https://git.example.org/infra/hv-01.git";
+          httpsTokenFile = "/etc/strata/token";
+        };
+      in
+      failedAssertions h == [ ]
+      &&
+        h.config.systemd.services.strata-controller.serviceConfig.LoadCredential
+        == [ "gitops-token:/etc/strata/token" ];
+    "gitops: signers are required" = gitopsFails "at least one key is required" (
+      sshGitops // { trustedSigners = [ ]; }
+    );
+    "gitops: ssh needs a key and the host key" =
+      gitopsFails "needs sshKeyFile and knownHosts" (sshGitops // { knownHosts = [ ]; })
+      && gitopsFails "needs sshKeyFile and knownHosts" (sshGitops // { sshKeyFile = null; });
+    "gitops: credentials outside the Nix store" = gitopsFails "must not be in the Nix store" (
+      sshGitops // { sshKeyFile = "/nix/store/abc-key"; }
+    );
+    "gitops: credentials match the scheme" =
+      gitopsFails "httpsTokenFile is for https" (sshGitops // { httpsTokenFile = "/etc/t"; })
+      && gitopsFails "sshKeyFile is for ssh" {
+        repository = "https://git.example.org/x.git";
+        sshKeyFile = "/etc/k";
+      };
+    "gitops: requires the agent and compute roles" =
+      hasFailure "strata.gitops requires strata.agent.enable and strata.compute.enable"
+        (hostWith [
+          static
+          {
+            strata.compute.enable = lib.mkForce false;
+            strata.gitops = sshGitops // {
+              enable = true;
+              trustedSigners = [ signer ];
+            };
+          }
+        ]);
+    "gitops: option types refuse other URLs and bad signer keys" =
+      throws
+        (gitopsWith (sshGitops // { repository = "file:///srv/repo"; })).config.strata.gitops.repository
+      &&
+        throws
+          (gitopsWith (sshGitops // { trustedSigners = [ "not a key" ]; }))
+          .config.strata.gitops.trustedSigners;
 
     # ---- storage ----
     "storage: valid pools have no failed assertions" = failedAssertions storage == [ ];

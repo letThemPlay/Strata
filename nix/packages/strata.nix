@@ -3,6 +3,8 @@
 {
   lib,
   buildGoModule,
+  git,
+  openssh,
   src,
   version,
   commit,
@@ -32,6 +34,11 @@ buildGoModule {
   ];
 
   doCheck = true;
+  # internal/gitops tests run git and ssh-keygen.
+  nativeCheckInputs = [
+    git
+    openssh
+  ];
   checkFlags = [ "-v" ];
   preCheck = ''
     # buildGoModule only tests subPackages by default; test everything.

@@ -54,6 +54,16 @@
     #   };
     # };
 
+    # Configuration from Git (M3, experimental: plans only for now). See
+    # docs/administration/gitops.md.
+    # gitops = {
+    #   enable = true;
+    #   repository = "ssh://git@git.example.org/infra/hv-01.git";
+    #   sshKeyFile = "/etc/strata/gitops-key";
+    #   knownHosts = [ "git.example.org ssh-ed25519 AAAA..." ];
+    #   trustedSigners = [ "ssh-ed25519 AAAA... alice" ];
+    # };
+
     # Virtual machines (M3, experimental: declared and validated here, not
     # applied yet; use `strata vm` meanwhile). See
     # docs/administration/workloads.md.

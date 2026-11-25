@@ -2,9 +2,10 @@
 
 **Status: experimental, M3 slice 1.** VMs can be declared in the host
 configuration and Strata produces their intermediate representation (IR).
-Nothing applies them yet: the controller that fetches the configuration
-from Git, plans and applies it arrives in M3 slices 2 and 3. Until then,
-manage VMs with `strata vm` ([VMs](vms.md)).
+Nothing applies them yet: the controller ([configuration from Git](gitops.md))
+fetches the configuration, verifies and evaluates it and shows the plan;
+applying it arrives in M3 slice 3b. Until then, manage VMs with `strata vm`
+([VMs](vms.md)).
 
 ## Declaring VMs
 

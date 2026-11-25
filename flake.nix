@@ -107,13 +107,26 @@
 
       nixosModules = {
         strata =
-          { lib, pkgs, ... }:
+          {
+            config,
+            lib,
+            pkgs,
+            ...
+          }:
           {
             imports = [
               disko.nixosModules.disko
               ./nix/modules
             ];
             strata.package = lib.mkDefault self.packages.${pkgs.stdenv.hostPlatform.system}.strata;
+            # The controller evaluates the host flake offline (ADR-0025): keep
+            # its inputs (Strata, nixpkgs, disko) in the store as long as
+            # this system generation exists.
+            system.extraDependencies = lib.mkIf config.strata.gitops.enable [
+              self.outPath
+              nixpkgs.outPath
+              disko.outPath
+            ];
           };
         default = self.nixosModules.strata;
       };
@@ -145,6 +158,7 @@
             shellcheck
             govulncheck
             jq
+            openssh
           ];
 
           shellHook = ''
@@ -264,6 +278,7 @@
           nixos-storage = import ./nix/tests/nixos/storage.nix { inherit self pkgs; };
           nixos-networks = import ./nix/tests/nixos/networks.nix { inherit self pkgs; };
           nixos-vms = import ./nix/tests/nixos/vms.nix { inherit self pkgs; };
+          nixos-gitops = import ./nix/tests/nixos/gitops.nix { inherit self pkgs; };
           nixos-nic-names = import ./nix/tests/nixos/nic-names.nix { inherit self pkgs; };
 
           # The reference host builds for every supported system.

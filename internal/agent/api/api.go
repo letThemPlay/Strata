@@ -536,3 +536,13 @@ func newID() (string, error) {
 	}
 	return hex.EncodeToString(b), nil
 }
+
+// ConnContext records the caller's credentials (SO_PEERCRED) of a Unix
+// connection in its context; use it as http.Server.ConnContext.
+func ConnContext(ctx context.Context, c net.Conn) context.Context { return withPeer(ctx, c) }
+
+// CallerUID returns the uid of the caller of r, if ConnContext recorded it.
+func CallerUID(r *http.Request) (uint32, bool) {
+	p := peerOf(r)
+	return p.uid, p.ok
+}

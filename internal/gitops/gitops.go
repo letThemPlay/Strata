@@ -321,6 +321,23 @@ func (r *Repo) FileID(ctx context.Context, sha, path string) (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// Tree returns the ID of commit sha's tree: what the commit contains,
+// recorded with each evaluation.
+func (r *Repo) Tree(ctx context.Context, sha string) (string, error) {
+	if !shaPattern.MatchString(sha) {
+		return "", fmt.Errorf("commit %q: not a full commit ID", sha)
+	}
+	out, err := r.git(ctx, nil, "rev-parse", "--verify", "--quiet", sha+"^{tree}")
+	if err != nil {
+		return "", fmt.Errorf("commit %s: no tree: %w", sha[:12], err)
+	}
+	tree := strings.TrimSpace(string(out))
+	if !shaPattern.MatchString(tree) {
+		return "", fmt.Errorf("commit %s: unexpected tree ID %q", sha[:12], tree)
+	}
+	return tree, nil
+}
+
 // FlakeURL is the flake reference of commit sha in the local repository.
 func (r *Repo) FlakeURL(sha string) string {
 	return "git+file://" + r.Dir + "?rev=" + sha

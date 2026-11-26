@@ -83,13 +83,16 @@ func serve(ctx context.Context, logger *slog.Logger, configFile, stateDir, creds
 		return err //nolint:wrapcheck // The message names the setting.
 	}
 	agentClient := &client.Client{Socket: agentSocket}
+	evaluator := &RemoteEvaluator{Socket: evalSocket, Timeout: time.Duration(cfg.EvalTimeoutSeconds) * time.Second}
 	c := &Controller{
 		Config: cfg, Repo: repo, Log: logger,
-		Eval:    &RemoteEvaluator{Socket: evalSocket, Timeout: time.Duration(cfg.EvalTimeoutSeconds) * time.Second},
-		Node:    agentClient,
-		Exec:    client.Provider{Client: agentClient},
-		Store:   &Store{Dir: stateDir},
-		Version: version.Get().Version,
+		Eval:       evaluator,
+		SystemEval: evaluator,
+		Observer:   RunObserver{},
+		Node:       agentClient,
+		Exec:       client.Provider{Client: agentClient},
+		Store:      &Store{Dir: stateDir},
+		Version:    version.Get().Version,
 	}
 
 	ctx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)

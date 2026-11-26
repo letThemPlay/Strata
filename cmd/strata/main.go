@@ -12,6 +12,7 @@ import (
 
 	"github.com/letthemplay/Strata/internal/cli"
 	"github.com/letthemplay/Strata/internal/configcli"
+	"github.com/letthemplay/Strata/internal/hostcli"
 	"github.com/letthemplay/Strata/internal/vmcli"
 )
 
@@ -25,7 +26,7 @@ func run() int {
 	cmd := cli.Command{
 		Name:        "strata",
 		Summary:     "Strata command-line client",
-		Subcommands: []cli.Subcommand{vmcli.Subcommand(os.Stdin), configcli.Subcommand(os.Stdin)},
+		Subcommands: []cli.Subcommand{vmcli.Subcommand(os.Stdin), configcli.Subcommand(os.Stdin), hostcli.Subcommand()},
 	}
 	return cmd.Run(ctx, os.Args[1:], os.Stdout, os.Stderr)
 }

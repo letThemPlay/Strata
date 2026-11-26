@@ -76,6 +76,26 @@ func (s *Server) Handler() http.Handler {
 		d, err := s.Controller.Deployment(r.PathValue("id"))
 		respond(w, http.StatusOK, d, err)
 	})
+	// Host configuration (ADR-0027, ADR-0028): evaluation and status only.
+	mux.HandleFunc("GET /api/v1/nodes", func(w http.ResponseWriter, _ *http.Request) {
+		writeJSON(w, http.StatusOK, s.Controller.Nodes())
+	})
+	mux.HandleFunc("GET /api/v1/nodes/{node}/configuration", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.Controller.CheckNode(r.PathValue("node")); err != nil {
+			writeError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, s.Controller.HostStatus())
+	})
+	mux.HandleFunc("POST /api/v1/nodes/{node}/configuration/evaluate", func(w http.ResponseWriter, r *http.Request) {
+		if err := s.Controller.CheckNode(r.PathValue("node")); err != nil {
+			writeError(w, err)
+			return
+		}
+		uid, _ := api.CallerUID(r)
+		ev, err := s.Controller.EvaluateHost(uid) //nolint:contextcheck // The evaluation outlives the request.
+		respond(w, http.StatusAccepted, ev, err)
+	})
 	return s.authorize(mux)
 }
 
@@ -117,13 +137,13 @@ func respond(w http.ResponseWriter, code int, v any, err error) {
 func writeError(w http.ResponseWriter, err error) {
 	code, kind := http.StatusInternalServerError, "internal"
 	switch {
-	case errors.Is(err, ErrNotAwaiting), errors.Is(err, ErrBusy):
+	case errors.Is(err, ErrNotAwaiting), errors.Is(err, ErrBusy), errors.Is(err, ErrHostBusy):
 		code, kind = http.StatusConflict, "conflict"
 	case errors.Is(err, ErrAllowDelete):
 		code, kind = http.StatusUnprocessableEntity, "allow_delete"
 	case errors.Is(err, ErrInvalidAction):
 		code, kind = http.StatusUnprocessableEntity, "invalid"
-	case errors.Is(err, ErrNoDeployment), errors.Is(err, ErrNoPlan):
+	case errors.Is(err, ErrNoDeployment), errors.Is(err, ErrNoPlan), errors.Is(err, ErrUnknownNode):
 		code, kind = http.StatusNotFound, "not_found"
 	}
 	writeJSON(w, code, api.ErrorResponse{Error: err.Error(), Code: kind})

@@ -828,6 +828,11 @@ authoritative for host deployments.
 | `/api/v1/deployments/{id}/resolution` | POST | Executor |
 | `/api/v1/operations/{id}` | GET | Controller, agent |
 
+Implemented so far (M3 slice 5a): `GET /api/v1/nodes`,
+`GET /api/v1/nodes/{node}/configuration` and
+`POST /api/v1/nodes/{node}/configuration/evaluate`, on the controller's
+socket ([host configuration](../administration/host-deployment.md)).
+
 `/api/v1/config` and `/api/v1/config/plan` (workloads) are unchanged. The
 agent's `/api/v1/host` (the Incus context) becomes `/api/v1/storage/pools`,
 `/api/v1/storage/volumes` and `/api/v1/networks` in M4 slice 1.

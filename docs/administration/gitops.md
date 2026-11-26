@@ -107,6 +107,15 @@ is set.
 
 ### Host changes
 
+> **This is the only way to apply host changes until M4, and Strata
+> doesn't take part in it:** the pull doesn't verify signatures, and
+> nothing is recorded. Strata's own host deployment (separate evaluate,
+> build, plan, approve, activate, verify and reboot steps, with revert) is
+> designed in [ADR-0027](../../ARCHITECTURE.md#adr-0027-host-lifecycle-subsystem-and-trust-boundaries)
+> and [the host lifecycle design](../architecture/host-lifecycle.md), and
+> is not implemented yet. From M4, this manual path remains for
+> emergencies only.
+
 Everything that is not a workload (pools, networks, users, Strata itself,
 `flake.lock`) is applied with `nixos-rebuild` from `/etc/nixos`, after
 pulling the same branch into it. Set it up once to pull with the deploy

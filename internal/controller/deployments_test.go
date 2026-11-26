@@ -360,3 +360,57 @@ func TestStore(t *testing.T) {
 		t.Fatalf("id %q %v", id, err)
 	}
 }
+
+// A new commit the node already matches is recorded as applied without
+// approval, so a later rewind past it is refused.
+func TestConvergedCommitIsRecordedAsApplied(t *testing.T) {
+	c, repo, _, _ := newController(t)
+	applied(t, c)
+	repo.head = c2 // declares the same as c1
+	c.Sync(context.Background())
+	st := c.Status()
+	if st.LastApplied != c2 || st.Awaiting != nil || !st.Plan.Converged {
+		t.Fatalf("status %+v", st)
+	}
+	var rec []DeploymentSummary
+	for _, d := range c.History(0) {
+		if d.Commit == c2 {
+			rec = append(rec, d)
+		}
+	}
+	if len(rec) != 1 || rec[0].Kind != KindPlan || rec[0].State != StateSucceeded || rec[0].ApprovedBy != "auto" {
+		t.Fatalf("records for c2 %+v", rec)
+	}
+	d, err := c.Deployment(rec[0].ID)
+	if err != nil || len(d.Transitions) != 1 || !strings.Contains(d.Transitions[0].Note, "already matches") || d.Plan == nil {
+		t.Errorf("record %+v %v", d, err)
+	}
+	if saved, err := c.Store.LoadState(); err != nil || saved.LastApplied != c2 {
+		t.Errorf("state %+v %v", saved, err)
+	}
+	// Not recorded again on the next sync.
+	n := len(c.History(0))
+	c.Sync(context.Background())
+	if len(c.History(0)) != n {
+		t.Errorf("recorded again: %+v", c.History(0))
+	}
+	// Rewinding to c1 is now refused.
+	repo.head = c1
+	c.Sync(context.Background())
+	if st := c.Status(); !strings.Contains(st.Error, "does not descend") {
+		t.Errorf("rewind accepted: %+v", st)
+	}
+}
+
+// A first commit that declares nothing is recorded as applied.
+func TestEmptyFirstCommitIsRecordedAsApplied(t *testing.T) {
+	c, _, ev, _ := newController(t)
+	ev.irs[c1] = []byte(strings.Split(string(golden(t)), `"resources": [`)[0] + `"resources": []}`)
+	c.Sync(context.Background())
+	if st := c.Status(); st.Error != "" || st.LastApplied != c1 || !st.Plan.Converged || st.Awaiting != nil {
+		t.Fatalf("status %+v", st)
+	}
+	if h := c.History(0); len(h) != 1 || h[0].ApprovedBy != "auto" || h[0].State != StateSucceeded {
+		t.Errorf("history %+v", h)
+	}
+}

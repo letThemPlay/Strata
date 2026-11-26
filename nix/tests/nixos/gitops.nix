@@ -447,6 +447,10 @@ pkgs.testers.runNixOSTest {
         assert inst("cli-vm")["config"]["user.strata.owner"] == "gitops"
         out = hv01.succeed(config("plan"))
         assert "vm/cli-vm" in out.split("In sync:")[1], out
+        # The node now matches the head: recorded as applied, without approval.
+        head = as_git("git -C ~/work rev-parse HEAD").strip()
+        assert status()["lastApplied"] == head, status()
+        hv01.succeed(config("history --json") + f" | jq -e '.[] | select(.commit == \"{head}\" and .approvedBy == \"auto\" and .state == \"SUCCEEDED\")'")
 
     with subtest("pin rolls back to a signed commit; unpin follows the branch again"):
         v6 = as_git("git -C ~/work rev-parse HEAD").strip()

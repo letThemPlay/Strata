@@ -123,7 +123,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 				var p controller.CurrentPlan
 				if err := c.do(ctx, http.MethodGet, "/api/v1/config/plan", nil, &p); err == nil {
 					_, _ = fmt.Fprintln(stdout)
-					printPlan(stdout, p)
+					printPlan(stdout, p, true)
 				}
 			}
 		})
@@ -136,7 +136,7 @@ func run(ctx context.Context, args []string, stdin io.Reader, stdout, stderr io.
 		if err := c.do(ctx, http.MethodGet, "/api/v1/config/plan", nil, &p); err != nil {
 			return fail(err)
 		}
-		return out(p, func() { printPlan(stdout, p) })
+		return out(p, func() { printPlan(stdout, p, true) })
 	case "apply":
 		return apply(ctx, c, *planID, *allowDelete, *yes, stdin, stdout, stderr)
 	case "history":
@@ -194,7 +194,7 @@ func apply(ctx context.Context, c *client, planID string, allowDelete, yes bool,
 	if p.Plan.ID != planID {
 		return fail(fmt.Errorf("plan %s is not the current plan (it is %s); review it with strata config plan", planID, p.Plan.ID))
 	}
-	printPlan(stdout, p)
+	printPlan(stdout, p, false)
 	if p.Plan.Deletes() && !allowDelete {
 		return fail(errors.New("the plan deletes VMs (their root disks; data volumes are kept): add --allow-delete to approve it"))
 	}
@@ -256,8 +256,11 @@ func printStatus(w io.Writer, s controller.Status) {
 	switch {
 	case s.Plan == nil:
 		p("Plan:         (none)\n")
-	case s.Plan.Converged:
+	case s.Plan.Items == 0:
 		p("Plan:         %s: nothing to do\n", s.Plan.ID)
+	case s.Plan.Converged:
+		// Only items that cannot be applied are left: nothing to approve.
+		p("Plan:         %s: %s, none can be applied (see strata config plan)\n", s.Plan.ID, items(s.Plan.Items))
 	default:
 		var notes []string
 		if s.Plan.Restarts {
@@ -272,7 +275,7 @@ func printStatus(w io.Writer, s controller.Status) {
 		if len(notes) == 0 {
 			notes = append(notes, "safe")
 		}
-		p("Plan:         %s: %d items (%s)\n", s.Plan.ID, s.Plan.Items, strings.Join(notes, ", "))
+		p("Plan:         %s: %s (%s)\n", s.Plan.ID, items(s.Plan.Items), strings.Join(notes, ", "))
 	}
 	if len(s.Drift) > 0 {
 		p("Drift:        %s (changed outside Strata)\n", strings.Join(s.Drift, ", "))
@@ -285,7 +288,8 @@ func printStatus(w io.Writer, s controller.Status) {
 	}
 }
 
-func printPlan(w io.Writer, cp controller.CurrentPlan) {
+// printPlan prints a plan; hint adds how to approve it.
+func printPlan(w io.Writer, cp controller.CurrentPlan, hint bool) {
 	p := func(format string, a ...any) { _, _ = fmt.Fprintf(w, format, a...) }
 	plan := cp.Plan
 	p("Plan %s for node %s, commit %s (signed by %s):\n", plan.ID, plan.Node, short(cp.Commit), cp.Signer)
@@ -334,7 +338,7 @@ func printPlan(w io.Writer, cp controller.CurrentPlan) {
 	if len(plan.Unmanaged) > 0 {
 		p("Not managed through Git (created with strata vm): %s\n", strings.Join(plan.Unmanaged, ", "))
 	}
-	if !plan.Converged() {
+	if hint && !plan.Converged() {
 		flag := ""
 		if plan.Deletes() {
 			flag = " --allow-delete"
@@ -488,4 +492,12 @@ func (c *client) do(ctx context.Context, method, path string, body, out any) err
 		return fmt.Errorf("malformed reply: %w", err)
 	}
 	return nil
+}
+
+// items returns "1 item", "2 items".
+func items(n int) string {
+	if n == 1 {
+		return "1 item"
+	}
+	return fmt.Sprintf("%d items", n)
 }

@@ -143,6 +143,162 @@ before adding hardware.
 
 Record the result in the M2 table below.
 
+## M3: configuration from Git
+
+M3's acceptance criterion is: **Git changes generate safe and repeatable
+infrastructure changes.** The `nixos-gitops` VM test covers the controller
+with a Git server inside the test; this procedure checks it with a real
+Git host over SSH, commits signed on a workstation, evaluation on real
+hardware and a real reboot. It needs a machine that passed the M2 checks,
+with its pool and guest network (the examples use `vms` and `lan`), and a
+**private repository** on a Git host reachable over SSH (the examples use
+GitHub; `OWNER/hv-01` is a placeholder).
+
+Run the commands marked *workstation* in your clone of the repository,
+and the others on the host as the admin user.
+
+0. **Prepare.**
+   - Update the host to the commit under test, and commit the result in
+     `/etc/nixos` (the controller evaluates the repository, so the
+     repository must hold what the host runs):
+
+     ```sh
+     cd /etc/nixos && sudo nix flake update && sudo nixos-rebuild switch --flake .#$(hostname)
+     sudo git add -A && sudo git -c user.name=admin -c user.email=admin@localhost commit -m "Update to the commit under test"
+     ```
+
+   - Remove what M2 left: `sudo incus storage volume delete vms
+     test-01-data --project strata` (and any test VM).
+   - Copy the repository to the workstation and push it to the new
+     private repository (`/etc/nixos` holds no secrets: the console
+     password hash and keys are outside it):
+
+     ```sh
+     sudo git -C /etc/nixos bundle create /tmp/hv-01.bundle --all && sudo chmod 644 /tmp/hv-01.bundle
+     # workstation:
+     scp strata-admin@HOST:/tmp/hv-01.bundle . && git clone hv-01.bundle hv-01 && cd hv-01
+     git remote set-url origin git@github.com:OWNER/hv-01.git && git push -u origin main
+     ```
+
+   - A signing key on the workstation, used for every commit from now on:
+
+     ```sh
+     ssh-keygen -t ed25519 -C "alice (strata signing)" -f ~/.ssh/strata-signing
+     git config gpg.format ssh && git config user.signingkey ~/.ssh/strata-signing.pub && git config commit.gpgsign true
+     ```
+
+1. **Enable gitops.** Create the deploy key on the host
+   ([configuration from Git](../administration/gitops.md#setting-it-up))
+   and add its public key to the repository as a **read-only** deploy key.
+   Get GitHub's host key with `ssh-keyscan -t ed25519 github.com` and
+   compare `ssh-keygen -lf` of it with the fingerprint GitHub publishes
+   ("GitHub's SSH key fingerprints"). *Workstation:* add to `host.nix`,
+   commit and push:
+
+   ```nix
+   strata.compute.incus.imageServers = [ "images.linuxcontainers.org" ];  # if not set in M2
+   strata.gitops = {
+     enable = true;
+     repository = "ssh://git@github.com/OWNER/hv-01.git";
+     sshKeyFile = "/etc/strata/gitops-key";
+     knownHosts = [ "github.com ssh-ed25519 AAAA..." ];
+     trustedSigners = [ "ssh-ed25519 AAAA... alice" ];   # ~/.ssh/strata-signing.pub
+   };
+   ```
+
+   On the host, pull it ([host changes](../administration/gitops.md#host-changes))
+   and rebuild. Expected: `systemctl --failed` lists nothing; `strata
+   config status` shows the commit evaluated and signed by `alice`, the
+   plan `nothing to do`. Record how long the evaluation took and its
+   memory peak: `journalctl -u strata-controller -o cat | grep
+   '"evaluated"'` (`seconds`) and `journalctl -u
+   'strata-controller-eval@*' | grep 'memory peak'`.
+2. **Declare a VM.** *Workstation:* add, commit and push:
+
+   ```nix
+   strata.workloads.vms.git-01 = {
+     resources = { cpu = 2; memory = "2GiB"; };
+     image = "debian/13/cloud";
+     imageServer = "images.linuxcontainers.org";
+     disks.root.size = "10GiB";
+     disks.data.size = "1GiB";
+     networks.eth0.network = "lan";
+     autostart = true;
+     cloudInit.sshAuthorizedKeys = [ "ssh-ed25519 AAAA... alice" ];
+   };
+   ```
+
+   `strata config sync`, `strata config plan` (one `create`), `strata
+   config apply --plan ID`. Expected: the deployment ends `SUCCEEDED`;
+   `strata vm list` shows `git-01` running, owner `gitops`; `strata config
+   history` shows it approved by your uid. SSH to the guest after
+   installing `openssh-server` (`sudo incus exec git-01 --project strata
+   -- apt-get install -y openssh-server`).
+3. **Repeatable.** `strata config sync` again. Expected: `nothing to do`,
+   no new record in `strata config history`.
+4. **Edit.** *Workstation:* `cpu = 4`, commit, push; sync. Expected: the
+   plan shows an update with a restart; after `apply`, the guest reports
+   4 CPUs (`nproc`).
+5. **The CLI boundary.** `strata vm update -f ...` and `strata vm delete
+   git-01 --confirm git-01` are refused (`managed by Git`); `strata vm
+   stop git-01` works and the plan stays `nothing to do` (the power state
+   is not declared); `strata vm start git-01` again.
+6. **Drift.** `sudo incus config set git-01 limits.memory=3GiB --project
+   strata`; sync. Expected: `status` lists `git-01` under drift, the plan
+   restores it; after `apply`, `limits.memory` is `2GiB` again.
+7. **Trust.** *Workstation:* push a commit made with `git commit
+   --no-gpg-sign`; sync. Expected: `refused: ... not signed`, not
+   evaluated (no new `"evaluated"` line in the journal). Then rewind the
+   branch past the last applied commit: `git reset --hard HEAD~2 && git
+   push --force`; sync. Expected: `does not descend from the last applied
+   commit`. Recover: `git reset --hard <last applied>` (from `status`) and
+   `git push --force`. Expected: evaluated, `nothing to do`.
+8. **Roll back.** `strata config pin <commit of step 2>`. Expected:
+   `status` shows it pinned; the plan sets 2 CPUs (restart); `apply`.
+   `strata config unpin`. Expected: the branch head is planned again
+   (4 CPUs); `apply`.
+9. **Adopt.** Create a VM with the CLI, and declare the same VM in Git:
+
+   ```sh
+   echo '{"apiVersion":"vm.strata.dev/v1alpha1","name":"cli-01","resources":{"cpu":1,"memory":"1GiB"},"disks":[{"name":"root","size":"2GiB","pool":"vms"}]}' > cli-01.json
+   strata vm create -f cli-01.json
+   ```
+
+   ```nix
+   strata.workloads.vms.cli-01 = {
+     resources = { cpu = 1; memory = "1GiB"; };
+     disks.root = { size = "2GiB"; pool = "vms"; };
+   };
+   ```
+
+   Push, sync. Expected: the plan says `cli-01` cannot be applied (owned
+   by the CLI; adopt it). `strata config adopt
+   cli-01`. Expected: owner `gitops`, the plan `nothing to do`.
+10. **Reboot** the host. Expected: `git-01` runs again (autostart);
+    `strata config status` keeps the last applied commit; `strata config
+    history` is kept; `systemctl --failed` lists nothing.
+11. **Protection and deletion.** Set `lifecycle.protected = true` on
+    `cli-01`, push, apply. Remove `cli-01` from the configuration, push,
+    sync. Expected: the plan says it cannot be applied (protected). Put it
+    back with `protected = false`, apply; remove it again, sync. Expected:
+    `strata config apply --plan ID` without `--allow-delete` is refused;
+    with it, `cli-01` is deleted. Remove `git-01` the same way. Expected:
+    the result lists the data volume `git-01-data` as kept, and `sudo
+    incus storage volume list vms --project strata` shows it.
+12. **Host change.** *Workstation:* `nix flake update`, commit, push;
+    sync. Expected: reported as a host change (`changes flake.lock`), not
+    evaluated. Pull on the host and rebuild; sync. Expected: evaluated,
+    `nothing to do`.
+13. **Optional: automatic application.** Set `strata.gitops.autoApply =
+    "safe"`, push, pull and rebuild on the host. Declare another VM,
+    push. Expected: within `interval` (or after `strata config sync`) it
+    is created, approved by `auto`. Remove it: the plan waits for
+    approval.
+
+Record the result in the M3 table below. Afterwards, delete the kept
+volume with `sudo incus storage volume delete vms git-01-data --project
+strata`.
+
 ## Results
 
 Record one row per machine. Attach `hardware.json` and any failing output
@@ -245,3 +401,8 @@ Follow-ups (not blocking M2):
 - **cloud-init packages:** the VM spec passes only SSH keys to cloud-init;
   images without an SSH server need another step. Proposed: an optional
   `cloudInit.packages` list in the spec (additive).
+
+### M3 results
+
+| Date | Commit | Machine | Git host | Evaluation (seconds, memory peak) | Result | Notes |
+|---|---|---|---|---|---|---|

@@ -231,8 +231,23 @@ func (r *Repo) Verify(ctx context.Context, sha, lastApplied string) (string, err
 	if !shaPattern.MatchString(sha) {
 		return "", fmt.Errorf("commit %q: not a full commit ID", sha)
 	}
+	// Only SSH signatures are verified: git would run gpg (or gpgsm) for
+	// the others, which the controller neither has nor trusts.
+	kind, err := r.signatureKind(ctx, sha)
+	if err != nil {
+		return "", err
+	}
+	switch kind {
+	case sigNone:
+		return "", fmt.Errorf("commit %s: %w (the commit is not signed)", sha[:12], ErrUntrusted)
+	case sigOpenPGP:
+		return "", fmt.Errorf("commit %s: %w (it has an OpenPGP signature; only SSH signatures are trusted. "+
+			"Commits made on a Git host's website are signed by the host's key: push a commit signed with your SSH key on top)", sha[:12], ErrUntrusted)
+	case sigOther:
+		return "", fmt.Errorf("commit %s: %w (it has an X.509 or unknown signature; only SSH signatures are trusted)", sha[:12], ErrUntrusted)
+	}
 	// --raw prints the ssh-keygen result on stderr; git reports it as an
-	// error when the signature is missing or not trusted.
+	// error when the signature is not trusted.
 	if _, err := r.git(ctx, nil, "verify-commit", "--raw", sha); err != nil {
 		return "", fmt.Errorf("commit %s: %w (%w)", sha[:12], ErrUntrusted, err)
 	}
@@ -249,6 +264,39 @@ func (r *Repo) Verify(ctx context.Context, sha, lastApplied string) (string, err
 		}
 	}
 	return signer, nil
+}
+
+// Signature kinds of a commit.
+const (
+	sigNone = iota
+	sigSSH
+	sigOpenPGP
+	sigOther
+)
+
+// signatureKind reads the signature header of commit sha (gpgsig, or
+// gpgsig-sha256 in a SHA-256 repository) and returns its kind.
+func (r *Repo) signatureKind(ctx context.Context, sha string) (int, error) {
+	out, err := r.git(ctx, nil, "cat-file", "commit", sha)
+	if err != nil {
+		return sigNone, err
+	}
+	header, _, _ := strings.Cut(string(out), "\n\n")
+	for line := range strings.SplitSeq(header, "\n") {
+		name, value, ok := strings.Cut(line, " ")
+		if !ok || (name != "gpgsig" && name != "gpgsig-sha256") {
+			continue
+		}
+		switch strings.TrimSpace(value) {
+		case "-----BEGIN SSH SIGNATURE-----":
+			return sigSSH, nil
+		case "-----BEGIN PGP SIGNATURE-----":
+			return sigOpenPGP, nil
+		default:
+			return sigOther, nil
+		}
+	}
+	return sigNone, nil
 }
 
 // signer returns the principal whose key signed sha.

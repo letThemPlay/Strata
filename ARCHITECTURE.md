@@ -1248,6 +1248,14 @@ Slices:
     approver (`uid:N` or `auto`), each transition with its time, each
     item's result (with kept data volumes) and the error. Pin, unpin and
     adoption are recorded too, as their own kinds.
+  - **A commit the node already matches** (verified, descending, with a
+    plan that has nothing to do) is recorded as applied without approval
+    (`approvedBy: auto`, `SUCCEEDED`, "the node already matches this
+    commit"), and becomes the last applied commit. Nothing changes on the
+    node, so there is nothing to approve; without it, a commit that needs
+    no changes (or one followed by an adoption) would never become the
+    anchor of the forward-only check, and a force-push removing it would
+    be accepted. Found in the M3 hardware run.
   - **Storage.** One JSON file per record in
     `/var/lib/strata-controller/deployments` (written atomically; IDs are
     time-sortable, `YYYYMMDDTHHMMSSZ-xxxxxx`, and validated before use as

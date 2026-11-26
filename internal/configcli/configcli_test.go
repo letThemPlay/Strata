@@ -172,6 +172,10 @@ func TestApply(t *testing.T) {
 		!strings.Contains(out, "  SUCCEEDED") || !strings.Contains(out, "succeeded      create          vm/new") {
 		t.Fatalf("apply: %d %s\n%s", code, errOut, out)
 	}
+	// Already approving: no "Approve with" hint.
+	if strings.Contains(out, "Approve with") {
+		t.Errorf("apply repeats the approval hint:\n%s", out)
+	}
 	if got := f.requests[len(f.requests)-1]; got != `POST /api/v1/config/apply {"allowDelete":false,"planId":"abc"}` {
 		t.Errorf("request %s", got)
 	}
@@ -261,5 +265,26 @@ func TestUsageAndConnection(t *testing.T) {
 	code, _, errOut := config(t, filepath.Join(t.TempDir(), "missing.sock"), "", "status")
 	if code != cli.ExitError || !strings.Contains(errOut, "the Strata controller is not running on this host") {
 		t.Errorf("missing socket: %d %s", code, errOut)
+	}
+}
+
+func TestItems(t *testing.T) {
+	if got := items(1) + ", " + items(0) + ", " + items(3); got != "1 item, 0 items, 3 items" {
+		t.Error(got)
+	}
+}
+
+func TestStatusPlanSummary(t *testing.T) {
+	for want, plan := range map[string]controller.PlanSummary{
+		"Plan:         p: nothing to do\n":                                        {ID: "p", Converged: true},
+		"Plan:         p: 1 item, none can be applied (see strata config plan)\n": {ID: "p", Items: 1, Unreconcilable: 1, Converged: true},
+		"Plan:         p: 2 items (restarts VMs, 1 cannot be applied)\n":          {ID: "p", Items: 2, Unreconcilable: 1, Restarts: true},
+		"Plan:         p: 1 item (safe)\n":                                        {ID: "p", Items: 1, Safe: true},
+	} {
+		var b strings.Builder
+		printStatus(&b, controller.Status{Plan: &plan})
+		if !strings.Contains(b.String(), want) {
+			t.Errorf("want %q in:\n%s", want, b.String())
+		}
 	}
 }

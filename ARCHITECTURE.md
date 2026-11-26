@@ -1,10 +1,15 @@
 # Strata Architecture
 
-**Status:** Milestones M1, M2 and M3 complete (M2: Incus host, the agent's
-restricted identity, storage pools, guest networks and VM management
-through the CLI; M3: VMs declared in the host configuration and applied
-from a signed Git repository with approval; both validated on physical
-hardware). M4 has not started. Incus
+**Status:** Milestones M1 and M2 complete, and M3 complete for its
+original (v0.2.0) scope (M2: Incus host, the agent's restricted identity,
+storage pools, guest networks and VM management through the CLI; M3: VMs
+declared in the host configuration and applied from a signed Git
+repository with approval; both validated on physical hardware).
+CLAUDE.md v0.3.0 makes host lifecycle management a first-class
+responsibility and adds read-only host evaluation and build to M3
+(slice 5, planned). The host lifecycle architecture is accepted
+([Host lifecycle](#host-lifecycle-target), ADR-0027) and not implemented.
+M4 has not started. Incus
 is the workload backend (ADR-0015). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
@@ -84,6 +89,48 @@ Incus Unix socket (ADR-0015).
 The Go backend never interprets arbitrary Nix expressions; it consumes only
 the IR.
 
+## Host lifecycle (target)
+
+CLAUDE.md v0.3.0 makes the lifecycle of the NixOS host itself a Strata
+responsibility, distinct from workload orchestration and coordinated
+with it. The accepted architecture is in ADR-0027; the detail (state
+machines, persistence, what was checked against the pinned nixpkgs) is in
+[docs/architecture/host-lifecycle.md](docs/architecture/host-lifecycle.md).
+Nothing of it is implemented yet. Host changes are applied by hand with
+`nixos-rebuild` until M4 ([configuration from Git](docs/administration/gitops.md#host-changes)).
+
+```
+                 operator session (strata-operators, local): plan / approve / acknowledge / confirm / resolve
+                                                     │
+                                                     ▼  /run/strata/host-approve.sock
+Git ─▶ controller (unprivileged) ─▶ agent (unprivileged) ─▶ strata-host exec (root, closed operation set:
+ signed  sync, workloads, builds,     relays, observes        eligibility, own plan, approvals, journal,
+         display plans, history                               transient units for activation and revert)
+Git ─▶ strata-host-fetch (own identity, network, no evaluation) ─▶ executor mirror ─▶ strata-host-eval@ (no network)
+```
+
+- Operations stay separate: evaluate, build, plan, activate (`test`),
+  verify, persist, reboot, roll back. Building never activates; activating
+  never implies a reboot.
+- The executor trusts no other Strata component for approval, eligibility
+  or the host plan. It establishes eligibility itself (signature;
+  repository and ref from root-controlled policy, through its own fetch;
+  forward-only against its own anchor; node), computes the plan from its
+  own inspection, and accepts only approvals sent to it directly by an
+  operator, bound to digests it recomputes before acting.
+- Plans separate verified host facts, inferred disruption risks and the
+  controller's (unverified) workload report. Default planning never runs
+  target code.
+- Activation is test, verify, then persist: the boot default changes only
+  after verification, and a revert timer taken from the previous system
+  restores it if verification fails.
+- Reboots are approved separately. Automatic boot recovery (systemd-boot
+  boot counting) is used only on hosts where hardware validation passed
+  and the attestation fingerprint still matches; otherwise console or
+  out-of-band access is required.
+- Rollback restores configuration, not persistent data, migrations or
+  external effects. Git rollback and generation rollback are distinct.
+
 ## Repository layout
 
 Directories are created when they gain real content (CLAUDE.md §5). Present
@@ -123,7 +170,7 @@ today:
 | `internal/agent/client` | Client of the agent's local API (`strata vm`, the controller), and the reconciler's provider over it (ADR-0026) |
 | `internal/configcli` | `strata config` |
 | `internal/controller`, `cmd/strata-controller` | The controller: synchronization, evaluation service, plans, deployments and their records, pin/unpin, adoption, its local API; `validate-ir` (ADR-0025, ADR-0026) |
-| `docs/` | Development, administration and installation documentation |
+| `docs/` | Architecture (designs too detailed for this document), development, administration and installation documentation |
 | `.github/workflows/` | CI |
 
 Planned (not yet created):
@@ -159,6 +206,9 @@ Planned (not yet created):
 | Planner and reconciler (`internal/planner`, `internal/reconciler`; tested against a mock provider), VM owner and protection, drift reporting, `strata vm` refusing Git-owned VMs | **Implemented** (M3 slice 2, experimental; ADR-0024) |
 | `strata.gitops`: the controller follows a signed Git repository, evaluates it without network and plans (`strata config status/sync/plan`) | **Implemented** (M3 slice 3a, experimental; ADR-0025) |
 | Applying approved plans from Git (`strata config apply`, `--allow-delete`), deployment records and history (optional pruning), `autoApply = "safe"`, pin/unpin, adoption | **Implemented** (M3 slice 3b, experimental; ADR-0026) |
+| Host lifecycle architecture (operations, trust boundaries, eligibility, approvals, activation and boot recovery, crash recovery) | **Accepted design**, not implemented ([design](docs/architecture/host-lifecycle.md); ADR-0027; ADR-0028 to ADR-0031 proposed) |
+| Host evaluation and build, read-only (`strata host status/build/history`, build records, drift against the running system) | Planned (M3 slice 5; ADR-0028) |
+| Host deployment: manifest and revision, input fetching, host planner, privileged executor and approvals, activation with revert, persistence, reboot and boot recovery, health verification, generation rollback | Planned (M4, before storage and containers; ADR-0029 to ADR-0031) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
 | Clustering | Planned (M6) |
@@ -333,10 +383,17 @@ Slices:
      application of safe plans, pin/unpin, adoption, history (ADR-0026).
      **Done.**
 4. Validation on physical hardware, and the fixes it found. **Done.**
+5. Host evaluation and build, read-only (CLAUDE.md v0.3.0): system
+   evaluation in the evaluation service, unprivileged builds through
+   nix-daemon with GC roots, build records, drift between the evaluated
+   head and the running system, `strata host status/build/history`
+   (ADR-0028). No activation, no root, no input fetching: a commit that
+   changes `flake.lock` is still reported as a host change. **Planned.**
 
 ### M3 status
 
-**M3 is complete.** Everything passes in VMs (`nixos-gitops` with a Git
+**M3 is complete for its original scope** (slices 1–4); slice 5 is
+planned for the scope CLAUDE.md v0.3.0 added. Everything passes in VMs (`nixos-gitops` with a Git
 server node, and the other NixOS VM tests), and the M3 section of the
 [hardware validation](docs/installation/hardware-validation.md#m3-configuration-from-git)
 passed on one physical machine (GMKtec M6 Ultra, AMD) with a private
@@ -359,6 +416,31 @@ Known limitations at the end of M3:
   approvals are by local uid until accounts (M5); no webhooks (M5).
 - Automatic application (`autoApply = "safe"`) is tested in VMs only.
 - One controller per host; clusters are designed in M6.
+- Host configuration can't yet be evaluated or built by Strata (slice 5).
+
+## M4 plan
+
+M4 ("manage VMs and both container types declaratively, and safely
+deploy a tested NixOS host configuration with observable deployment
+outcomes"). Host deployment comes first: storage declared through NixOS
+(LVM-thin, new pools) needs a safe host deployment. Proposed order:
+
+1. Host foundations: the host manifest and `system.configurationRevision`,
+   input fetching (`strata-host-fetch`), the static host planner with
+   change classes and the storage policy, the agent's
+   `/api/v1/nodes/{node}/system` API, and renaming the agent's
+   `/api/v1/host` (ADR-0029).
+2. The privileged executor and approvals: `strata-host exec`, eligibility,
+   the approval socket, digests, expiry and invalidation, the journal and
+   recovery service (ADR-0030).
+3. Activation: test, verify, persist; the revert timer; health
+   verification; confirming a new SSH management session (experimental,
+   after its spike); generation rollback (ADR-0031).
+4. Reboot and boot recovery: reboot approvals, the four boot levels, boot
+   counting with attestation (ADR-0031).
+5. Hardware validation of host deployment on hv-02
+   ([required checks](docs/architecture/host-lifecycle.md#18-hardware-validation-required)).
+6. Volumes, then LVM-thin and ZFS, system containers, OCI containers.
 
 
 ## Architecture decision records
@@ -541,6 +623,13 @@ Known limitations at the end of M3:
   test`, boot-menu rollback) and console access. Automatic rollback belongs to
   the M3 executor. VLAN-tagged and bonded management interfaces are deferred
   to M2.
+- **Correction (CLAUDE.md v0.3.0, ADR-0027):** the M3 executor applies
+  workloads only. Reverting host changes, including network changes that
+  cut off management, is designed in ADR-0027 and ADR-0031 (a revert timer
+  taken from the previous system, confirmation of a new SSH management
+  session, the boot default unchanged until verification) and implemented
+  in M4. Until then recovery is NixOS generations and console access, as
+  above.
 
 ### ADR-0012: System disk layout: ext4 on one disk, UEFI, systemd-boot
 
@@ -1240,6 +1329,14 @@ Known limitations at the end of M3:
   not supported in M3 (they need a network listener, M5). Slice 3b adds
   applying, deployment records (with optional pruning), automatic
   application of safe plans, pinning and adoption (ADR-0026).
+- **Update (ADR-0027):** host deployment (building, activating) is
+  designed in ADR-0027. A commit that changes `flake.lock` remains a host
+  change until M4 fetches inputs (ADR-0029). This evaluation service runs
+  as `strata-controller` and reads the controller's repository, so its
+  results serve the controller only. The host executor never trusts them:
+  it fetches into its own mirror and evaluates with its own identity
+  (ADR-0030). The trust anchor here (`trustedSigners` from the running
+  system) is kept for host deployments.
 
 ### ADR-0026: Applying plans from Git, and deployment records
 
@@ -1315,3 +1412,300 @@ Known limitations at the end of M3:
   is applied then. Records live on the node and are lost with it until
   PostgreSQL (M5). Approvals are tied to local uids until the management
   API brings accounts (M5).
+- **Update (ADR-0027):** these records, states and approvals are for
+  workload deployments. Host deployments use the executor's journal as
+  their authoritative record, with resumable states and an outcome field
+  (ADR-0030, ADR-0031). The `Init` rule (an in-progress record is marked
+  FAILED "interrupted") applies to workload deployments only. The
+  converged-commit rule and `lastApplied` are workload concepts; the
+  host executor keeps its own forward-only anchor.
+
+### ADR-0027: Host lifecycle subsystem and trust boundaries
+
+- **Status:** Accepted (architecture; project owner, after M3, before M4).
+  Not implemented. Detail in
+  [docs/architecture/host-lifecycle.md](docs/architecture/host-lifecycle.md)
+  (cited below as "design §N").
+- **Context:** CLAUDE.md v0.3.0 makes the NixOS host's lifecycle a Strata
+  responsibility, distinct from workload orchestration and independent of
+  the workload backend (§2.1, §6.1). Until now host changes were applied
+  by hand (`git pull` in `/etc/nixos`, `nixos-rebuild switch`): unsigned,
+  unrecorded, with evaluation, build and activation in one step. The agent
+  is unprivileged (ADR-0007) and must stay so.
+- **Decision:**
+  - **Separate subsystem.** Host lifecycle management never uses
+    `internal/incus` or `internal/workload` and is not a
+    `reconciler.Provider`. It shares Git sync and trust (`internal/gitops`),
+    records, approval and audit patterns with the workload path, not its
+    execution. Host state is a separate, versioned manifest
+    (`host.strata.dev/v1alpha1`, ADR-0029), not part of the workload IR.
+  - **Separate operations** (design §3): evaluate, build, plan, activate,
+    verify, persist, reboot, roll back. Building never activates;
+    activating never implies a reboot; a reboot needs its own approval.
+    Git rollback (an older commit) and generation rollback (an existing
+    profile generation) are different operations. Neither reverses
+    persistent data, migrations or external effects.
+  - **Trust boundaries** (design §2). Root work happens only in
+    `strata-host exec`: socket-activated, a closed operation set, callers
+    identified by kernel peer credentials, every request audited. It trusts
+    no other Strata component for approval, deployment eligibility or the
+    host plan:
+    - eligibility comes from root-controlled policy and the executor's own
+      fetch, mirror, evaluation identity and anchor (ADR-0030);
+    - the plan comes from its own inspection of the host (design §5.4);
+    - approvals come directly from an operator over a socket the
+      controller and agent can't reach, and are bound to digests the
+      executor recomputes before acting (ADR-0030).
+  - **Three categories in every host plan** (design §5): verified host
+    facts (inspected by the executor), inferred disruption risks
+    (assessments, not guarantees), and the controller's workload report
+    (never verified by the executor, labelled so). Default planning never
+    runs code from the target configuration.
+  - **Storage policy** (design §13): creating or adopting a pool needs
+    approval and validation, rechecked immediately before creation;
+    changing a pool's declaration is unsupported; undeclaring a pool,
+    disk reinitialization, and destructive filesystem or root-device
+    changes are refused by ordinary host deployment.
+  - **API** (design §14): host resources under `/api/v1/nodes/{node}`
+    (`configuration`, `system`, `system/generations`, `system/health`,
+    `builds`, `plan`); host and workload deployments under
+    `/api/v1/deployments` (`kind`), with `approvals`, `acknowledgements`,
+    `confirmation` and `resolution` served by the executor.
+  - **Single node first:** safe deployment and recovery; no rolling
+    upgrades; no promise of workload availability, migration or restart.
+  - **Staging:** read-only evaluation and build in M3 slice 5 (ADR-0028);
+    deployment in M4, before storage and container work (ADR-0029 to
+    ADR-0031); visibility in M5; coordinated maintenance and signed remote
+    approvals in M6; hardened recovery in M7.
+- **Consequences:** two more root components (the executor and its
+  recovery service) and two more unprivileged ones (fetch and
+  evaluation), each with one job. Operators must act through the approval
+  socket, on the host. Members of `strata-operators` can approve, and
+  `strata-admin` has passwordless sudo, so approvals protect against
+  compromised components, not compromised operators. Activated target code
+  runs as root, so protections against a misbehaving target are best
+  effort; the unchanged boot default is the last layer.
+
+### ADR-0028: Host evaluation and build
+
+- **Status:** Proposed (M3 slice 5; finalized when implemented).
+- **Context:** CLAUDE.md v0.3.0's M3 acceptance: host configurations can
+  be evaluated and built independently of activation. ADR-0027 keeps M3
+  read-only: no root, no activation, no network fetch.
+- **Decision:**
+  - The controller's evaluation service (ADR-0025) also evaluates
+    `nixosConfigurations.<node>.config.system.build.toplevel`
+    (`drvPath`, `outPath`), in the same sandbox: no network, pure, no
+    import-from-derivation, a memory cap and a timeout. Time and memory are
+    measured, in VM tests and on hv-02, before the cap is set.
+  - Builds are unprivileged: the controller asks nix-daemon to realise the
+    `drvPath`, with an indirect GC root in its state directory. A build
+    never touches the system profile, the boot loader or the running
+    system.
+  - Build operations have records of their own: `PENDING → VALIDATING →
+    BUILDING → SUCCEEDED | FAILED`, holding the commit, tree, flake lock
+    blob, `drvPath`, `outPath`, timings and errors.
+  - Drift: the evaluated head's `outPath` against `/run/current-system`,
+    shown as "the host runs a different system than Git declares".
+  - `strata host status | build | history`.
+  - These results serve the controller only. The executor (ADR-0030)
+    never trusts them for provenance.
+  - **Limitation, stated in the M3 acceptance:** a commit whose
+    `flake.lock` needs inputs not on the host can't be evaluated or built;
+    it is reported as a host change, as today. Fetching inputs is M4
+    (ADR-0029).
+- **Consequences:** builds use disk and CPU on the host; GC roots for
+  builds are removed when a newer build of the same node succeeds, or
+  when the build is older than the retention the slice defines.
+  `strata-controller` must not be in nix `trusted-users`; the gitops
+  module asserts it.
+
+### ADR-0029: Host manifest, revision and input fetching
+
+- **Status:** Proposed (M4 slice 1; finalized when implemented).
+- **Context:** a running system can't say which commit it was built from
+  (no `system.configurationRevision`), host changes outside workloads are
+  invisible to the controller, and commits with new inputs can't be
+  evaluated (ADR-0025).
+- **Decision:**
+  - The host template sets `system.configurationRevision`; existing host
+    flakes get a warning asking for it.
+  - The Strata modules write a deterministic manifest,
+    `host.strata.dev/v1alpha1`, into every system closure: node, Strata
+    version, kernel, initrd and kernel-modules paths, management interface
+    and addressing, firewall ports, NIC pins, pools, guest networks, the
+    Incus package, required units, boot loader settings.
+  - **Input fetching:** `strata-host-fetch`, an unprivileged unit with
+    its own identity and network, fetches the configured repository and
+    ref into the executor's mirror (`transfer.fsckObjects=true`) and the
+    commit's flake inputs (`nix flake archive`, pinned by `narHash`). It
+    evaluates nothing; that `nix flake archive` doesn't evaluate outputs is
+    verified in this slice. Evaluation stays network-less.
+  - **The host planner** (`internal/host`, pure Go, run by the executor
+    and, for display, by the controller) produces the three categories of
+    ADR-0027 and the change classes of design §6.1, from manifests, static
+    unit-file differences and the executor's inspection. The unit actions
+    `switch-to-configuration` is likely to take are **inferred** from unit
+    files and their `X-*` keys, and labelled as such. A VM test compares
+    the inference with real `dry-activate` output for test configurations,
+    to detect divergence.
+  - **Hardware facts** are recorded with source, observation time,
+    confidence (`certain`, `ambiguous`, `unavailable`) and whether they were
+    rechecked before the operation (design §5.4). A safety-critical fact
+    that can't be established refuses the operation, naming it: for
+    example, no permanent MAC for a pinned or management interface, or a
+    disk ID that resolves differently.
+  - The agent's `/api/v1/host` (Incus context) becomes
+    `/api/v1/storage/pools`, `/api/v1/storage/volumes` and
+    `/api/v1/networks`; the agent serves `/api/v1/nodes/{node}/system` for
+    its own node.
+- **Consequences:** every generation describes itself, which also covers
+  boot-menu rollbacks and manual rebuilds. The static inference can miss
+  effects; it is never called verified.
+
+### ADR-0030: Privileged executor and approvals
+
+- **Status:** Proposed (M4 slice 2; finalized when implemented).
+- **Context:** ADR-0027's trust boundaries. A compromised controller or
+  agent must not be able to bypass approval, for example by submitting a
+  trusted signed commit, or to influence provenance. The controller's
+  evaluation service runs as `strata-controller` and reads the
+  controller's repository (ADR-0025), so it can't serve provenance.
+- **Decision:**
+  - **`strata-host exec`** (root, socket-activated per request): an
+    operation socket reachable only by the agent's group, and an approval
+    socket for `strata-operators`. Closed operation set: register,
+    describe, approve, acknowledge, revoke, cancel, activate, confirm,
+    revert, persist, reboot, roll back, resolve, inspect-activation. Callers
+    are identified by `SO_PEERCRED` (and `SO_PEERPIDFD` where a process is
+    inspected). Every request is audited.
+  - **Eligibility** (design §4), from `/etc/strata/host-deployment.json`
+    generated from the running system's options (node, repository, ref,
+    signers, policy):
+    1. the SSH signature on the executor's mirror;
+    2. the commit is the tip of the configured ref, or an ancestor of it,
+       as fetched by `strata-host-fetch`;
+    3. forward-only against the executor's own anchor (the last commit
+       persisted as healthy);
+    4. node.
+
+    Initial deployments need `--initial`. Git and generation rollbacks
+    need `--rollback-below-anchor`, and the anchor never moves backwards.
+    Cancelling leaves the anchor unchanged. Re-registering with a
+    different commit or target is refused. After an `unknown` outcome,
+    nothing is accepted until an operator resolves it.
+  - **Provenance:** `strata-host-eval@` (its own identity, no network,
+    the mirror read-only) evaluates the target `outPath` and manifest. The
+    executor requires its own `outPath` to be valid in the store.
+  - **Default plans run no target code.** `dry-activate` is a separate
+    operation (`inspect-activation`), only on the approval socket, with
+    `--run-target-code`, a warning, an audit record and a single-use
+    approval. Its output is labelled as reported by target scripts and is
+    never described as complete (design §6.4).
+  - **Approval** (design §7.1) binds node, repository, ref, commit, tree,
+    flake lock, evaluation target, target closure, current and booted
+    systems, source generation, eligibility, plan, hardware, policy and
+    attestation digests, the relevant Nix settings, the accepted flags,
+    and the approver (from peer credentials). Before acting, everything is
+    recomputed and compared.
+  - **Workload-interruption acknowledgement** (design §7.2) is a separate
+    object, bound to the plan digest and to the digest, timestamp and
+    sender of the exact controller report the executor stored and showed.
+    It doesn't verify workload state.
+  - **Lifetime** (design §7.3): single use; TTL 30 minutes by default
+    (policy, up to 24 hours); invalidated by any change of a bound input,
+    including signers, repository or ref policy, Nix settings, hardware
+    facts or attestation, by another deployment starting, cancellation or
+    re-registration; revocable.
+  - **Persistence and recovery** (design §12):
+    - a per-deployment hash-chained journal with a canonical body
+      encoding, `head.json`, torn-tail quarantine and truncation;
+    - step results written durably by the step process itself;
+    - three step states (not started, completed, uncertain), settled from
+      inspected host state, never by repeating a non-idempotent step;
+    - a bounded state lock, held for every mutation and never while
+      waiting for a human;
+    - `strata-host-recover.service` at boot and after executor failures;
+    - `unknown` outcomes blocking new deployments until `resolve`.
+  - **GC retention** (design §11): direct roots under
+    `/nix/var/nix/gcroots/strata-host/` (added with
+    `nix-store --realise --add-root`) for the target, the previous
+    system, last known good, and every system referenced by an unresolved
+    record or a pending reboot. A record alone never protects a path.
+    Missing closures give explicit outcomes.
+  - The gitops and host modules assert that `strata-controller` is not in
+    nix `trusted-users`.
+- **Consequences:** approvals must be given on the host, by an operator
+  session. M6 replaces peer credentials with SSH-signed approval objects
+  for a remote controller; the object format is designed for it.
+
+### ADR-0031: Activation, reboot and boot recovery
+
+- **Status:** Proposed (M4 slices 3–4; finalized when implemented).
+  Pin-specific semantics were checked at nixpkgs
+  `2786a2a72088ecf32aea5b3ec52099e6a7cff78f` (design §16) and must be
+  re-checked on every nixpkgs update.
+- **Context:** `switch-to-configuration test` is a real temporary
+  activation; boot entries come from profile generations; boot counting
+  exists at the pinned revision, but a failed boot doesn't reboot by
+  itself, and fallback goes to the newest entry not marked bad.
+- **Decision:**
+  - **Activation:**
+    1. arm the revert timer;
+    2. `<target>/bin/switch-to-configuration test` in a transient unit;
+    3. verify;
+    4. persist (`nix-env -p /nix/var/nix/profiles/system --set <target>`,
+       then `<target>/bin/switch-to-configuration boot`, then check that
+       the entry exists and is selected).
+
+    The boot default is unchanged until persisting. Exit codes 2 and 4
+    revert immediately. Exit 100 means nothing was activated: the
+    deployment continues only on the reboot path.
+  - **Revert timer** (design §9.2): transient
+    `strata-host-revert-<deployment>.{timer,service}` in PID 1 (no `@`, no
+    unit file in any configuration, so `switch-to-configuration` takes no
+    action on it), with an absolute deadline also journaled. Its command
+    uses absolute store paths from the previous system (that system's
+    `strata-host`, `<previous>/bin/switch-to-configuration test`), GC
+    rooted, independent of the target's networking, systemd configuration,
+    agent and controller. It pre-empts an activation still running (stops
+    its unit, records the activation as uncertain). It is re-armed by the
+    recovery service if missing. A failed revert gives outcome
+    `revert-failed`, blocks new deployments and is shown first; an explicit
+    policy `onRevertFailure = "reboot"` (default `"report"`) reboots into
+    the unchanged boot default. Surviving a systemd re-execution is to be
+    validated.
+  - **Rollback restores configuration only.** Plans list the effects
+    reverting won't undo (design §8), under `--accept-irreversible`.
+  - **Health verification** (design §9.3) and **four boot levels**
+    recorded separately: boot loader selection, `boot-complete.target`,
+    Strata health, and the workload report (controller-reported). Reaching
+    `boot-complete.target` is not evidence of Strata or workload health.
+  - **Confirming a new SSH management session** is **experimental**
+    (design §9.4). It is named narrowly, records the confirmer's identity
+    (which may differ from the approver's), and doesn't replace health
+    verification. Console or out-of-band access stays required for
+    `management` changes until its spike criteria pass in the VM test and
+    on hv-02.
+  - **Reboot** (design §10): a separate approval bound to the target,
+    booted system and attestation. Failure classes:
+    - A: the boot fails and something reboots the host;
+    - B: the host hangs (watchdog or manual reset);
+    - C: the boot loader fails (boot counting can't help).
+
+    `kernel` changes use boot counting only with a valid, unstale
+    attestation; otherwise, and for class B without an attested watchdog,
+    console access is required. `bootloader` changes always require it.
+    Every rollback creates a new generation.
+  - **Attestation** (design §10.4) is declared per host after hardware
+    validation, with a fingerprint the executor recomputes. It covers:
+    the ESP's systemd-boot binary and version (at least 260); firmware
+    identity and `BootOrder`; the kernel and initrd arrangement; the boot
+    loader configuration; the watchdog; and the recovery policy version. A
+    changed fingerprint makes it stale, i.e. unverified.
+  - No recovery mechanism is described as automatic before it passes on
+    the host's own hardware. A VM test never counts as hardware
+    validation.
+- **Consequences:** a reboot and a full boot cycle are needed to validate
+  each host. A single node can't observe its own absence: a host that
+  doesn't come back stays `REBOOTING` until someone looks at it.

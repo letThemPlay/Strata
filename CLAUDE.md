@@ -1,6 +1,6 @@
 # Strata — Claude Code Project Specification
 
-**Version:** 0.2.0 (workload backend revised: Incus, ADR-0015)  
+**Version:** 0.3.0 (host lifecycle management added; workload backend: Incus, ADR-0015)  
 **Status:** Initial development specification  
 **Project:** Strata  
 **Platform:** NixOS  
@@ -15,7 +15,14 @@ You are acting as a senior systems architect, Linux virtualization engineer, Nix
 
 Your responsibility is to help design, implement, test, and maintain Strata.
 
-Strata is a declarative, bare-metal virtualization platform built on NixOS. Its intended capabilities are comparable to Proxmox VE, but its defining architectural principle is that infrastructure configuration is declarative, reproducible, and managed through Git.
+Strata is a declarative, bare-metal virtualization and infrastructure orchestration platform built on NixOS. Its intended capabilities are comparable to Proxmox VE, but its defining architectural principle is that infrastructure configuration is declarative, reproducible, and managed through Git.
+
+Strata manages both:
+
+- The lifecycle and configuration of its underlying NixOS hosts.
+- The lifecycle and configuration of the workloads running on those hosts.
+
+These are distinct but coordinated responsibilities.
 
 You must prioritize:
 
@@ -41,12 +48,19 @@ Do not silently change established architectural decisions.
 
 If an implementation requirement conflicts with this specification, explain the conflict and propose a resolution before making a major architectural change.
 
+Do not assume that planned functionality already exists. Verify the current implementation before modifying or documenting it.
+
 # 2. Project vision
 
 Strata is a bare-metal virtualization and infrastructure management platform powered by NixOS.
 
 The platform provides:
 
+- Declarative NixOS host management.
+- NixOS host configuration evaluation and building.
+- Controlled host deployment and activation.
+- Host generation tracking and rollback capabilities.
+- Host health monitoring and drift detection.
 - Virtual machine management.
 - System container management.
 - OCI application container management.
@@ -73,11 +87,38 @@ Infrastructure should be described using Nix configurations.
 
 The system must be capable of comparing desired infrastructure state with actual infrastructure state.
 
+### Host lifecycle is a first-class responsibility
+
+Strata MUST manage the lifecycle of its underlying NixOS hosts, not merely the workloads running on them.
+
+Host orchestration and workload orchestration are distinct but coordinated responsibilities:
+
+- **Host orchestration:** NixOS configuration, evaluation, building, deployment, activation, upgrades, rollback, reboot coordination and host health verification.
+- **Workload orchestration:** Virtual machines, system containers, application containers, storage, networking and workload lifecycle management.
+
+Host orchestration MUST remain independent of the selected workload backend.
+
+Git remains the authoritative source of desired host configuration.
+
+Strata MUST support evaluating and building host configurations before activation, tracking deployed system generations, recording deployment history and verifying host health after changes.
+
+Disruptive host operations, including network changes, storage changes and reboots, MUST have appropriate planning, authorization and recovery safeguards.
+
+Host and workload orchestration MUST be coordinated so that host changes account for their potential impact on running workloads.
+
+Building, activating, rebooting and verifying a host are separate operations. Strata MUST NOT treat them as one indivisible operation.
+
+A successful build MUST NOT be reported as a successful deployment. A successful activation MUST NOT be reported as a healthy host until post-deployment verification has completed.
+
+Reboots MUST NOT occur automatically unless an explicit, authorized policy permits them.
+
+Rollback MUST account for the fact that reverting a NixOS system generation does not necessarily reverse persistent data changes, storage modifications, external service changes or other side effects.
+
 ### Git as source of truth
 
 Git repositories are authoritative for desired infrastructure configuration.
 
-PostgreSQL stores runtime inventory, operations, audit information, and other application state.
+PostgreSQL stores runtime inventory, operations, audit information, deployment metadata, and other application state.
 
 PostgreSQL must not silently become a second source of desired infrastructure configuration.
 
@@ -93,17 +134,25 @@ Repeatedly applying an unchanged configuration must not create unnecessary infra
 
 ### Modularity
 
-Workload, storage, and networking concerns must be separated behind interfaces. The workload backend (Incus) is accessed only through its provider package, so that it can be replaced by a mock in tests and is not referenced elsewhere.
+Workload, host management, storage, and networking concerns must be separated behind interfaces.
+
+The workload backend (Incus) is accessed only through its provider package, so that it can be replaced by a mock in tests and is not referenced elsewhere.
+
+Host lifecycle operations must be separated from workload provider operations.
 
 ### Separation of concerns
 
-The management plane must be independent of workload execution.
+The management plane must be independent of workload execution and local host operation.
 
 Running workloads must continue operating when the management API or dashboard is unavailable.
+
+The node agent must be capable of performing authorized local operations without requiring the dashboard to remain available.
 
 ### Data persistence
 
 VM disks, container volumes, and persistent application data must never be treated as disposable Nix build artifacts.
+
+Host configuration deployment must not implicitly authorize the deletion or reinitialization of persistent workload data.
 
 # 3. Technology stack
 
@@ -140,7 +189,7 @@ The decision and its rationale are recorded in ARCHITECTURE.md, ADR-0015.
 
 # 4. Architecture
 
-The platform consists of three logical planes.
+The platform consists of three logical planes, with host and workload management represented as distinct control-plane responsibilities.
 
 ## 4.1 Management plane
 
@@ -157,7 +206,7 @@ Components:
 
 ## 4.2 Control plane
 
-Responsible for infrastructure management.
+Responsible for infrastructure management and desired-state reconciliation.
 
 Components:
 
@@ -169,20 +218,50 @@ Components:
 - Reconciliation.
 - Scheduling.
 - Cluster coordination.
+- Host lifecycle management.
+- Workload lifecycle management.
+
+Host lifecycle management is responsible for:
+
+- NixOS host configuration.
+- Host configuration evaluation.
+- Host system builds.
+- Deployment planning.
+- Controlled activation.
+- Reboot coordination.
+- Generation tracking.
+- Rollback planning.
+- Post-deployment health verification.
+- Host configuration drift detection.
+
+Workload lifecycle management is responsible for:
+
+- VM lifecycle through Incus.
+- System container lifecycle through Incus.
+- OCI application container lifecycle through Incus.
+- Workload storage and networking.
+- Workload state verification.
+
+These subsystems must share the desired-state, planning, authorization, auditing and reconciliation infrastructure where appropriate, without conflating their execution responsibilities.
 
 ## 4.3 Infrastructure plane
 
-Responsible for actual workload execution.
+Responsible for actual host operation and workload execution.
 
 Components:
 
-- NixOS host.
+- NixOS hosts.
+- NixOS-managed host services.
 - KVM/QEMU and LXC, managed by Incus.
 - Storage pools (Incus).
 - Networking providers.
 - Node agents.
 
 The infrastructure plane must not depend on the management dashboard to maintain running workloads.
+
+The node agent provides a controlled local execution interface for authorized host and workload operations.
+
+It must not expose an unrestricted remote root shell or unrestricted Incus access.
 
 # 5. Repository structure
 
@@ -235,6 +314,7 @@ Strata/
 │   ├── reconciler/
 │   ├── executor/
 │   ├── inventory/
+│   ├── host/
 │   ├── workload/
 │   ├── incus/
 │   ├── storage/
@@ -267,9 +347,11 @@ Strata/
 
 Directories may be introduced incrementally. Do not create large numbers of empty packages without an implementation requirement.
 
+The `internal/host/` package is a proposed architectural boundary, not a requirement to create an empty package immediately.
+
 # 6. NixOS requirements
 
-NixOS is the underlying operating system.
+NixOS is both the underlying operating system and a managed resource within Strata.
 
 The platform must use NixOS modules to manage host configuration.
 
@@ -284,6 +366,7 @@ The initial host implementation must support:
 - Network configuration.
 - Storage configuration.
 - Strata agent.
+- Declarative system configuration.
 
 Create a dedicated NixOS module namespace:
 
@@ -321,6 +404,131 @@ Detect CPU virtualization capabilities and support both Intel and AMD.
 
 Do not assume that ZFS is available with every kernel configuration.
 
+## 6.1 Host lifecycle management
+
+Strata MUST provide a distinct host lifecycle management subsystem.
+
+The subsystem manages the NixOS system configuration and deployment lifecycle of each registered host.
+
+Its responsibilities include:
+
+1. Retrieving the desired host configuration from Git.
+2. Resolving the pinned repository and flake revision.
+3. Evaluating the host configuration.
+4. Validating the evaluated configuration.
+5. Building the resulting NixOS system closure.
+6. Generating a deployment plan.
+7. Checking the potential impact on host services and workloads.
+8. Obtaining required authorization.
+9. Deploying and activating the new system generation.
+10. Verifying host health.
+11. Recording deployment metadata and results.
+12. Detecting configuration drift.
+
+Evaluation and building MUST be possible without activating the resulting configuration.
+
+A build failure MUST NOT change the active host configuration.
+
+A successful build MUST be recorded separately from activation.
+
+### 6.1.1 Separate lifecycle operations
+
+The implementation MUST distinguish the following operations:
+
+| Operation | Responsibility |
+|---|---|
+| Evaluate | Evaluate the desired NixOS configuration and report errors |
+| Build | Build the system closure without activating it |
+| Plan | Determine deployment actions, risks and expected impact |
+| Activate | Switch the running host to the new system generation |
+| Reboot | Restart the host when explicitly required and authorized |
+| Verify | Confirm the host and its required services are healthy |
+| Rollback | Plan and execute a return to a previous system generation where safe |
+
+Do not combine these into an opaque `rebuild` operation.
+
+The CLI and API may offer higher-level workflows, but their individual steps and outcomes must remain observable.
+
+### 6.1.2 Deployment safeguards
+
+Host deployment can affect the management connection, storage, networking, kernel, boot configuration and running workloads.
+
+Therefore:
+
+- Build before activation.
+- Preserve the currently active system generation.
+- Record the target generation before activation.
+- Check for potentially disruptive network and storage changes.
+- Detect whether a reboot is required.
+- Do not automatically reboot without explicit authorization or an explicitly configured policy.
+- Preserve a recovery path if activation interrupts remote management.
+- Verify the host after activation.
+- Report incomplete or uncertain deployments accurately.
+- Never report a successful deployment solely because a command returned successfully.
+
+Host activation and rollback must use supported NixOS mechanisms rather than custom manipulation of the Nix store or bootloader.
+
+Rollback is not guaranteed to reverse persistent data changes or external side effects. Strata must communicate these limitations and require additional safeguards where necessary.
+
+### 6.1.3 Host generation and deployment history
+
+For every host deployment, record:
+
+- Host identity.
+- Repository identity.
+- Commit SHA.
+- Flake lock revision.
+- Strata version.
+- Previous system generation.
+- Target system generation.
+- Build result.
+- Activation result.
+- Reboot requirement and result, if applicable.
+- Post-deployment health result.
+- Start and completion timestamps.
+- Initiating user or automation identity.
+- Approval and audit information.
+- Relevant errors and warnings.
+
+Generation history must be available through the API and CLI and eventually the dashboard.
+
+### 6.1.4 Host health verification
+
+After activation, Strata must verify that the host is reachable and that required services are operating.
+
+Verification should include, as appropriate:
+
+- Node agent connectivity.
+- Host operating system and generation information.
+- Required management networking.
+- Storage availability.
+- Incus service health.
+- Required host services.
+- Workload availability.
+
+A failed health check must be recorded as a deployment failure or degraded outcome, not silently treated as success.
+
+### 6.1.5 Host and workload coordination
+
+Host changes must be evaluated for their potential impact on workloads.
+
+Examples include:
+
+- Kernel changes.
+- Network configuration changes.
+- Storage configuration changes.
+- Incus service changes.
+- System upgrades.
+- Reboots.
+
+For the initial single-node implementation, provide safe deployment planning and explicit maintenance safeguards.
+
+Do not promise automated workload migration or uninterrupted maintenance on a single host.
+
+Future multi-node maintenance may coordinate workload placement, migration and capacity checks, but must account for CPU architecture, CPU feature compatibility, storage locality, network configuration and backend capabilities.
+
+Do not assume that workloads can always be migrated between heterogeneous hosts.
+
 # 7. Declarative configuration system
 
 Strata configuration is expressed using Nix.
@@ -338,6 +546,9 @@ The initial configuration model must support:
 - Network interfaces.
 - Resource limits.
 - Lifecycle policies.
+- Host configuration references and deployment policies.
+
+Host configuration and workload configuration must be distinguishable in the desired-state model, even when they are maintained in the same Git repository.
 
 Example proposed workload configuration:
 
@@ -388,6 +599,10 @@ Implement the following pipeline:
 11. Verify resulting state.
 12. Record deployment information.
 
+Host configuration deployments and workload deployments may use different execution workflows, but should share appropriate evaluation, validation, planning, authorization, audit and reporting infrastructure.
+
+Host deployment must preserve the separate evaluate, build, activate, reboot and verify stages defined in Section 6.1.
+
 ## 7.2 Intermediate representation
 
 The Go backend must not attempt to understand arbitrary Nix language expressions.
@@ -405,13 +620,15 @@ The IR should have:
 - Backend capabilities.
 - Validation metadata.
 
+The IR must represent host configuration resources and workload resources without conflating their lifecycle operations.
+
 Prefer JSON as the initial serialization format.
 
 Version the IR from the beginning.
 
 # 8. GitOps architecture
 
-Git is the authoritative source of desired infrastructure state.
+Git is the authoritative source of desired infrastructure state, including NixOS host configuration.
 
 Support:
 
@@ -440,9 +657,13 @@ Every deployment must record:
 - Deployment timestamp.
 - Result.
 
+Host deployments must additionally record the system generation and the separate build, activation, reboot and verification outcomes.
+
 Do not apply untrusted Git configurations automatically.
 
 Nix evaluation must use an appropriately restricted execution environment and an explicit repository trust policy.
+
+A Git configuration rollback and a NixOS system generation rollback are separate operations. Do not assume that reverting a Git revision automatically reverses a deployed system or its persistent data.
 
 # 9. Reconciliation engine
 
@@ -469,6 +690,20 @@ The executor applies approved plans.
 
 Operations must be idempotent wherever possible.
 
+Host lifecycle operations must be represented explicitly rather than treated as ordinary workload provider operations.
+
+The host planner must identify changes that may affect:
+
+- Management connectivity.
+- Network interfaces and firewall rules.
+- Storage configuration.
+- Kernel and boot configuration.
+- Incus services.
+- Running workloads.
+- Reboot requirements.
+
+Host operations must not be activated merely because a new desired configuration has been evaluated or built.
+
 Every operation must have:
 
 - Unique ID.
@@ -486,17 +721,25 @@ Use explicit operation states:
 PENDING
 VALIDATING
 PLANNING
+BUILDING
 AWAITING_APPROVAL
 APPLYING
+ACTIVATING
+REBOOT_REQUIRED
+REBOOTING
 VERIFYING
 SUCCEEDED
 FAILED
 CANCELLED
 ```
 
+Not every operation uses every state. State transitions must be validated and documented.
+
 Never report success until the resulting infrastructure state has been verified.
 
 Destructive operations require explicit approval.
+
+Host activation, rollback and reboot operations must use appropriate authorization and recovery safeguards.
 
 # 10. Workload providers
 
@@ -588,6 +831,10 @@ Use interfaces to separate infrastructure providers from management logic.
 
 Provider implementations must be independently testable.
 
+Host lifecycle operations should have a separate interface from workload provider operations.
+
+The node agent must expose narrowly scoped, authenticated and auditable host operations. It must not become a general-purpose remote root command executor.
+
 Follow these standards:
 
 - Use context.Context for cancellable operations.
@@ -628,7 +875,13 @@ Initial resources:
 /config
 /deployments
 /operations
+/hosts
+/hosts/{id}/configuration
+/hosts/{id}/generations
+/hosts/{id}/deployments
 ```
+
+Host endpoints are proposed resources, not an assertion that these endpoints already exist.
 
 Use OpenAPI to document the API.
 
@@ -640,6 +893,8 @@ The CLI and dashboard must use the same API and authorization model.
 
 Do not duplicate business logic in the frontend.
 
+Host lifecycle operations must expose their individual stages and results. Do not represent evaluation, build, activation and reboot as an opaque operation with no observable progress.
+
 # 13. Frontend standards
 
 Use React and TypeScript.
@@ -649,6 +904,11 @@ The dashboard should provide:
 - Cluster overview.
 - Node overview.
 - Hardware information.
+- Host configuration status.
+- Host system generation history.
+- Host deployment history.
+- Host health and drift status.
+- Host deployment plans.
 - VM management.
 - System container management.
 - OCI container management.
@@ -667,6 +927,10 @@ Keep API communication in dedicated service modules.
 Never embed infrastructure execution logic in the frontend.
 
 Show administrators the planned impact of configuration changes before applying them.
+
+Host deployment interfaces must distinguish evaluation, building, activation, rebooting and health verification.
+
+Clearly display when a reboot is required and require the appropriate authorization before initiating it.
 
 # 14. Storage architecture
 
@@ -694,6 +958,8 @@ Important rules:
 - Expose snapshot capabilities accurately.
 - Test backup restoration.
 - Make storage operations auditable.
+- Host configuration deployment must not implicitly reformat, reinitialize or delete workload storage.
+- Changes to storage topology or disk layout require explicit planning and safeguards.
 
 Do not claim that ZFS snapshots are equivalent to application-consistent backups.
 
@@ -718,6 +984,8 @@ Do not apply disruptive network changes without a recovery mechanism.
 
 The management network must be isolated from guest networking by default.
 
+Host networking deployments must account for the possibility of losing the remote management connection. A deployment that removes connectivity must not be treated as safely recoverable solely because the new NixOS generation built successfully.
+
 # 16. Cluster architecture
 
 Cluster support is a later development phase.
@@ -734,6 +1002,10 @@ Cluster coordination is designed in M6. Incus clustering is the likely candidate
 Do not implement automatic failover until quorum, fencing, workload ownership, and storage consistency have been designed and tested.
 
 Do not assume that distributed configuration automatically provides distributed storage.
+
+Future host maintenance coordination must account for workload placement, capacity, CPU architecture, CPU feature compatibility, storage locality and migration capabilities.
+
+Do not assume that all workloads can be migrated between heterogeneous hosts.
 
 # 17. Security requirements
 
@@ -753,6 +1025,7 @@ Implement:
 - Secure API communication.
 - Restricted Nix evaluation.
 - Explicit approval of destructive operations.
+- Restricted and auditable host lifecycle operations.
 
 Never:
 
@@ -764,10 +1037,15 @@ Never:
 - Give the API server unrestricted root access.
 - Execute untrusted shell commands.
 - Automatically trust arbitrary Git repositories.
+- Automatically reboot a host without an explicitly authorized policy.
+- Treat a NixOS generation rollback as a guaranteed reversal of persistent data changes.
+- Allow host configuration deployment to implicitly authorize destructive disk or storage operations.
 
 Use SOPS and age for encrypted configuration secrets.
 
-Use a dedicated node agent for local infrastructure operations, with only the privileges it needs (a restricted Incus identity for workloads).
+Use a dedicated node agent for local infrastructure operations, with only the privileges it needs (a restricted Incus identity for workloads and narrowly scoped host operations).
+
+The agent's host operation interface must be explicit, authenticated, authorized and audited.
 
 # 18. Testing requirements
 
@@ -784,6 +1062,29 @@ Testing layers:
 7. Frontend tests.
 8. End-to-end tests.
 
+Host lifecycle management additionally requires tests for:
+
+- Host configuration evaluation.
+- Build failures.
+- Successful system closure builds.
+- Deployment plan generation.
+- Activation outcomes.
+- Reboot-required detection.
+- Authorization of disruptive operations.
+- Health verification.
+- Generation history.
+- Rollback planning.
+- Recovery and failure reporting.
+- Network or storage changes that could interrupt management.
+
+Use test fixtures and mock providers for unit tests.
+
+Never require production hardware for ordinary unit tests.
+
+Test failure paths, not only successful operations.
+
+Physical hardware validation must be recorded separately from automated test results. A successful VM test or Nix evaluation must not be reported as proof of physical hardware compatibility.
+
 Required commands should be documented in the Makefile.
 
 At minimum, establish:
@@ -795,15 +1096,11 @@ nix flake check
 
 Add formatter and linter checks.
 
-Use test fixtures and mock providers for unit tests.
-
-Never require production hardware for ordinary unit tests.
-
-Test failure paths, not only successful operations.
-
 # 19. Development roadmap
 
 Implement the project incrementally.
+
+Host lifecycle management is a core product responsibility, but its capabilities should be introduced in stages. Do not disrupt existing milestone work or pull every advanced host management feature into the initial implementation.
 
 ## M0 — Foundation
 
@@ -821,14 +1118,15 @@ Acceptance: Repository builds and automated checks pass.
 - Custom NixOS ISO.
 - Hardware discovery.
 - Installation.
-- Host configuration.
+- Initial host configuration.
 - Agent installation.
+- Host identity and registration foundations.
 
 Acceptance: Install and boot Strata on physical hardware.
 
-## M2 — VM management
+## M2 — Workload backend foundation
 
-- Incus on the host, replacing libvirtd.
+- Incus on the host, replacing libvirtd as the workload manager.
 - Restricted Strata project and agent identity, proven by tests.
 - Incus provider.
 - VM schema.
@@ -838,7 +1136,7 @@ Acceptance: Install and boot Strata on physical hardware.
 
 Acceptance: Manage VMs through the CLI.
 
-## M3 — Declarative engine
+## M3 — Declarative engine and host configuration foundations
 
 - Git integration.
 - Nix evaluation.
@@ -847,20 +1145,27 @@ Acceptance: Manage VMs through the CLI.
 - Planning.
 - Reconciliation.
 - Drift detection.
+- Host configuration represented as managed desired state.
+- Host configuration evaluation and build architecture.
+- Host deployment planning and metadata design.
 
-Acceptance: Git changes generate safe and repeatable infrastructure changes.
+Acceptance: Git changes generate safe and repeatable infrastructure plans, and host configurations can be evaluated and built independently of activation.
 
-## M4 — Containers and storage
+## M4 — Containers, storage and host deployment foundations
 
 - System containers (Incus).
 - OCI application containers (Incus).
 - ZFS.
 - LVM-thin.
 - Volume management.
+- Controlled NixOS host activation.
+- Host generation tracking.
+- Post-activation health verification.
+- Explicit authorization for disruptive host changes.
 
-Acceptance: Manage VMs and both container types declaratively.
+Acceptance: Manage VMs and both container types declaratively, and safely deploy a tested NixOS host configuration with observable deployment outcomes.
 
-## M5 — Web interface
+## M5 — Web interface and host management visibility
 
 - REST API.
 - Dashboard.
@@ -868,10 +1173,14 @@ Acceptance: Manage VMs and both container types declaratively.
 - Authorization.
 - Monitoring.
 - Audit logs.
+- Host configuration status.
+- Host deployment history.
+- Host generation visibility.
+- Host health and drift reporting.
 
-Acceptance: Manage a standalone hypervisor through both interfaces.
+Acceptance: Manage a standalone hypervisor and inspect host deployment status through both interfaces.
 
-## M6 — Cluster management
+## M6 — Cluster management and coordinated maintenance
 
 - Node registration.
 - Remote operations.
@@ -879,8 +1188,11 @@ Acceptance: Manage a standalone hypervisor through both interfaces.
 - Cluster coordination (designed in M6).
 - Scheduling.
 - Migration.
+- Workload-aware host maintenance planning.
+- Coordinated host upgrades where safe.
+- Reboot coordination.
 
-Acceptance: Manage multiple hypervisor nodes.
+Acceptance: Manage multiple hypervisor nodes and perform tested, coordinated maintenance operations within documented compatibility and recovery limits.
 
 ## M7 — Production capabilities
 
@@ -890,6 +1202,8 @@ Acceptance: Manage multiple hypervisor nodes.
 - Fencing.
 - Failure recovery.
 - Security hardening.
+- More robust host rollback and recovery.
+- Improved upgrade and maintenance workflows.
 
 Acceptance: Demonstrate tested recovery from node and storage failures.
 
@@ -923,6 +1237,10 @@ Avoid unrelated refactoring.
 
 Follow existing naming and package conventions.
 
+Do not expand the scope of an in-progress milestone without explaining why the change is necessary.
+
+When a proposed change affects host lifecycle management, explain its relationship to workload orchestration and the node agent.
+
 ## Step 4 — Validate
 
 Run relevant:
@@ -939,6 +1257,8 @@ Never claim a test passed unless it was actually executed successfully.
 
 Update documentation when interfaces, configuration options, or architecture change.
 
+Architecture changes involving host lifecycle management must be reflected in ARCHITECTURE.md and relevant ADRs.
+
 ## Step 6 — Report
 
 Summarize:
@@ -948,6 +1268,8 @@ Summarize:
 - Tests executed.
 - Known limitations.
 - Suggested next task.
+
+Clearly distinguish implemented functionality from architectural proposals and future roadmap items.
 
 # 21. Rules against premature complexity
 
@@ -960,12 +1282,20 @@ Do not:
 - Create abstractions without at least one real use case.
 - Implement custom replacements for established Linux virtualization components without justification.
 - Build the entire web dashboard before the backend interfaces stabilize.
+- Implement automated rolling host upgrades before workload coordination and recovery have been designed.
+- Automatically reboot hosts as part of ordinary configuration reconciliation.
+- Assume that NixOS rollback reverses persistent data or external side effects.
+- Turn the node agent into an unrestricted remote root shell.
 
 Prefer working vertical slices.
 
 For example:
 
 Git configuration → Nix evaluation → VM planning → Incus execution → state verification.
+
+For host management:
+
+Git host configuration → Nix evaluation → system build → deployment plan → authorized activation → health verification.
 
 A complete working path is more valuable than ten unfinished modules.
 
@@ -980,6 +1310,8 @@ A feature is complete only when:
 5. Its tests pass.
 6. Its documentation is updated.
 7. It does not break existing functionality.
+
+For host lifecycle features, completion also requires that the implemented operation stages, authorization requirements, failure states and recovery limitations are documented.
 
 Do not mark planned functionality as implemented.
 
@@ -1007,6 +1339,8 @@ Your first deliverable should include:
 
 Do not implement the installer, VM engine, cluster manager, or web dashboard during M0.
 
+Do not implement host activation, reboot orchestration or automated rollback during M0.
+
 Before finishing, run the available validation commands and report their actual results.
 
 The goal is a clean, reproducible foundation for the subsequent Strata implementation.
@@ -1015,4 +1349,4 @@ The goal is a clean, reproducible foundation for the subsequent Strata implement
 
 **End of specification.**
 
-Strata is intended to become a robust, declarative, NixOS-native virtualization platform. Every implementation decision should contribute to that goal.
+Strata is intended to become a robust, declarative, NixOS-native virtualization and infrastructure orchestration platform. It manages both the hosts that provide infrastructure and the workloads that run on them. Every implementation decision should contribute to that goal.

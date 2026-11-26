@@ -4,14 +4,16 @@ Strata is a declarative, bare-metal virtualization platform built on NixOS.
 Infrastructure is described in Nix, stored in Git, and reconciled onto VMs
 and containers managed by Incus (KVM/QEMU, LXC and OCI application containers).
 
-> **Status: milestones M1, M2 and M3 complete** (validated on physical
-> hardware). A Strata host is installed from an offline ISO and runs Incus
+> **Status: milestones M1 and M2 complete; M3 complete for its original
+> scope** (validated on physical hardware). A Strata host is installed from an offline ISO and runs Incus
 > with a restricted project for workloads: storage pools on dedicated disks,
 > guest networks bridged to their own NICs, and VMs managed with
 > `strata vm` (create, update with a plan, delete with confirmation)
 > through the host's agent, or declared in the host configuration and
 > applied from a signed Git repository after approval (`strata config`).
-> Containers and volumes (M4), the web interface and API (M5) and clusters
+> Host lifecycle management (evaluating, building and deploying the host's
+> own NixOS configuration; designed, not implemented: M3 slice 5 and M4),
+> containers and volumes (M4), the web interface and API (M5) and clusters
 > (M6) are not implemented yet. See
 > [ARCHITECTURE.md](ARCHITECTURE.md#current-status).
 
@@ -45,5 +47,6 @@ nix flake init -t github:letThemPlay/Strata#host
 - [docs/installation/hardware-validation.md](docs/installation/hardware-validation.md) — physical hardware validation (M1 acceptance)
 - [docs/administration/workloads.md](docs/administration/workloads.md) — declared workloads and the IR (M3, experimental)
 - [docs/administration/gitops.md](docs/administration/gitops.md) — the controller: configuration from Git (M3, experimental)
+- [docs/architecture/host-lifecycle.md](docs/architecture/host-lifecycle.md) — host lifecycle management (accepted design, not implemented)
 - [examples/standalone](examples/standalone/host.nix) — example host with declared workloads
 - [CLAUDE.md](CLAUDE.md) — full project specification and roadmap

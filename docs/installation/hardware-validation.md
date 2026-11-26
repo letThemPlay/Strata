@@ -280,9 +280,13 @@ and the others on the host as the admin user.
 11. **Protection and deletion.** Set `lifecycle.protected = true` on
     `cli-01`, push, apply. Remove `cli-01` from the configuration, push,
     sync. Expected: the plan says it cannot be applied (protected). Put it
-    back with `protected = false`, apply; remove it again, sync. Expected:
-    `strata config apply --plan ID` without `--allow-delete` is refused;
-    with it, `cli-01` is deleted. Remove `git-01` the same way. Expected:
+    back with `protected = false`, apply. `cli-01` has no OS and ignores a
+    shutdown request, so stop it first: `strata vm stop cli-01 --force`
+    (**before** the next sync: a change on the node after the plan is
+    made makes the approval stale, and the deployment fails at `PLANNING`
+    with nothing applied). Remove it again, sync. Expected: `strata
+    config apply --plan ID` without `--allow-delete` is refused; with it,
+    `cli-01` is deleted. Remove `git-01` the same way. Expected:
     the result lists the data volume `git-01-data` as kept, and `sudo
     incus storage volume list vms --project strata` shows it.
 12. **Host change.** *Workstation:* `nix flake update`, commit, push;
@@ -406,3 +410,72 @@ Follow-ups (not blocking M2):
 
 | Date | Commit | Machine | Git host | Evaluation (seconds, memory peak) | Result | Notes |
 |---|---|---|---|---|---|---|
+| 2026-11-26 | `main` after PR #23 (`3008795`); from step 12, `m3/hardware-validation` (`dc64ef8`) | GMKtec M6 Ultra (AMD Ryzen 5 7640HS), node `hv-02` | Private GitHub repository over SSH (read-only deploy key), commits signed with an SSH key on a workstation | 1.6 s, 471 MB (first, cold); 1.5 s, 467 MB (next) | **Pass** (steps 0–12; 13 not run) | See below |
+
+### GMKtec M6 Ultra (AMD), M3, 2026-11-26
+
+The host from the M2 run (pool `vms`, ZFS; guest network `lan`), with its
+configuration pushed to a private GitHub repository and the controller
+enabled. Every required step passed, run as `strata-admin` with commits
+pushed from a workstation:
+
+- **1:** the deploy key worked with `ssh -i`, but `sudo git pull` in
+  `/etc/nixos` was refused (`Permission denied (publickey)`): Git as root
+  used root's own keys. Setting `core.sshCommand` in `/etc/nixos` fixed
+  it (now documented). The first commit was refused with `cannot run gpg`:
+  the workstation signs with GPG for other repositories, and the commit
+  had an OpenPGP signature. After switching the clone to SSH signing the
+  commit was verified and evaluated. **Fixed after this:** commits with an
+  OpenPGP or X.509 signature are refused with the reason, without running
+  gpg. The signer showed as `signer1` (no name in `trustedSigners`).
+- **2-3:** `git-01` (Debian 13 from the allow-listed image server, 10 GiB
+  root, 1 GiB data disk, `lan`, autostart) was created through an approved
+  plan in 5 seconds; the record holds repository, commit, signer,
+  `flake.lock` blob, Strata version, node, approver and every state with
+  its time. SSH to the guest worked (after installing `openssh-server`
+  with `incus exec`, as in M2). A second sync: nothing to do, no new
+  record.
+- **4-6:** a CPU change was planned with a restart and applied (the guest
+  reported 4 CPUs); `strata vm update` and `delete` were refused for the Git
+  VM, `stop`/`start` allowed, and the plan stayed converged while it was
+  stopped; a memory change made with `incus` was found by the periodic sync
+  and restored after approval.
+- **7:** an unsigned head was refused and not evaluated; a force-push
+  behind the last applied commit was refused; moving the branch back made
+  the controller follow it again.
+- **8:** pinning the step 2 commit planned the full rollback (CPU 4 -> 2 and
+  deleting the then adopted `cli-01`), refused without `--allow-delete`,
+  applied with it, and recorded as pinned (the guest reported 2 CPUs);
+  unpinning planned and applied the branch head again (4 CPUs).
+- **9:** a VM created with `strata vm` and declared in Git was reported as
+  owned by the CLI; `strata config adopt` moved it to Git (a first attempt
+  before the commit was pushed was refused and recorded as failed).
+  **Fixed after this:** the status summarized a plan with only an
+  unreconcilable item as "nothing to do"; and the commit was not recorded
+  as applied, because nothing needed applying, so the forward-only check
+  stayed at an older commit. A commit the node already matches is now
+  recorded as applied (approved by `auto`); confirmed on the host after
+  step 12.
+- **10:** after a host reboot `git-01` ran again; status, last applied
+  commit and history were kept; no failed units.
+- **11:** a protected VM removed from the configuration was kept and
+  reported; after clearing protection, deletion was refused without
+  `--allow-delete`. The first approval failed at `PLANNING`, with nothing
+  applied, because the VM had been force-stopped after the plan was made
+  (the stale-plan check); the new plan was applied. Deleting `git-01` kept
+  `vms/git-01-data`, listed in the plan, the result and Incus.
+- **12:** a `flake.lock` change (to the branch with the fixes) was reported
+  as a host change and not evaluated; after `git pull` and `nixos-rebuild`
+  in `/etc/nixos` it was evaluated offline. **Fixed after this:** the
+  message included Nix's whole trace; it now shows Nix's final error, and
+  the journal keeps the trace.
+- **13** (automatic application) was not run on hardware; `nixos-gitops`
+  covers it.
+
+Follow-ups (not blocking M3):
+
+- Approvals go stale when anything on the node changes after the plan,
+  including power state. Correct, but an operator stopping a VM to delete
+  it must do so before the plan is made (documented in step 11).
+- The pull into `/etc/nixos` for host changes does not verify signatures;
+  only the controller does (documented).

@@ -405,12 +405,14 @@ func (c *Controller) evaluate(ctx context.Context, sha, lastApplied string, last
 	}
 	data, err := c.Eval.IR(ctx, c.Repo.FlakeURL(sha), c.Config.Node)
 	if err != nil {
+		detail := err.Error()
+		var ee *EvalError
+		if errors.As(err, &ee) {
+			detail = ee.Cause()
+			// Messages show the cause; the journal keeps Nix's trace.
+			c.log().WarnContext(ctx, "evaluation failed", "commit", sha, "nix", ee.Detail)
+		}
 		if lastGood != nil && lastGood.flakeLock != lock {
-			detail := err.Error()
-			var ee *EvalError
-			if errors.As(err, &ee) {
-				detail = ee.Detail
-			}
 			return nil, fmt.Errorf("commit %s changes flake.lock: the host configuration changed; apply it with nixos-rebuild first. Nix reported:\n%s", short(sha), detail)
 		}
 		return nil, fmt.Errorf("commit %s: %w", short(sha), err)

@@ -447,6 +447,27 @@ func TestNixError(t *testing.T) {
 	}
 }
 
+// Messages show Nix's innermost error, not the trace before it.
+func TestEvalErrorCause(t *testing.T) {
+	for detail, want := range map[string]string{
+		"error:\n       … while calling the 'seq' builtin\n         at «github:NixOS/nixpkgs/x»/lib/modules.nix:408:18:\n\n" +
+			"       (stack trace truncated; use '--show-trace' to show the full, detailed trace)\n\n" +
+			"       error: Failed to open archive (unable to download 'https://github.com/x.tar.gz': Could not resolve host: github.com)": "error: Failed to open archive (unable to download 'https://github.com/x.tar.gz': Could not resolve host: github.com)",
+		"error:\n       … while evaluating the option `strata.ir':\n\n       error: strata.ir: the configuration has failed assertions:\n" +
+			"       - strata.workloads.vms.web-01.disks.root.pool: \"nopool\" is not declared in strata.storage.pools.": "error: strata.ir: the configuration has failed assertions:\n" +
+			"- strata.workloads.vms.web-01.disks.root.pool: \"nopool\" is not declared in strata.storage.pools.",
+		"no error line": "no error line",
+	} {
+		e := &EvalError{Detail: detail}
+		if got := e.Cause(); got != want {
+			t.Errorf("Cause:\n%s\nwant:\n%s", got, want)
+		}
+		if strings.Contains(e.Error(), "modules.nix") {
+			t.Errorf("Error() includes the trace: %s", e.Error())
+		}
+	}
+}
+
 // evalService serves ServeEval on a socket, as systemd does with
 // Accept=yes, with the fake nix script.
 func evalService(t *testing.T, script string) string {

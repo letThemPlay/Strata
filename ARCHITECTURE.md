@@ -1,8 +1,10 @@
 # Strata Architecture
 
-**Status:** Milestones M1 and M2 complete (M2: Incus host, the agent's
+**Status:** Milestones M1, M2 and M3 complete (M2: Incus host, the agent's
 restricted identity, storage pools, guest networks and VM management
-through the CLI, validated on physical hardware). M3 has not started. Incus
+through the CLI; M3: VMs declared in the host configuration and applied
+from a signed Git repository with approval; both validated on physical
+hardware). M4 has not started. Incus
 is the workload backend (ADR-0015). This document describes the target
 architecture and records which parts exist today. Anything not listed as
 **Implemented** in [Current status](#current-status) is a plan, not a feature.
@@ -153,8 +155,8 @@ Planned (not yet created):
 | VM schema `vm.strata.dev/v1alpha1`; `strata vm create/list/show/start/stop/restart/update/delete` through the agent's local API (operations, verification, audit; plans confirmed by ID; deletion keeps data volumes); image server allow-list | **Implemented** (M2 slices 4a–4b, experimental; ADR-0020, ADR-0021) |
 | M2 acceptance on physical hardware | **Passed** (GMKtec M6 Ultra, AMD; see [results](docs/installation/hardware-validation.md#m2-results)) |
 | NAT/routed guest networks; bonds | Planned (later) |
-| `strata.workloads.vms` and the IR `ir.strata.dev/v1alpha1` (`config.strata.ir`, `strata-controller validate-ir`); not applied yet | **Implemented** (M3 slice 1, experimental; ADR-0023) |
-| Planner and reconciler (`internal/planner`, `internal/reconciler`; tested against a mock provider), VM owner and protection, drift reporting, `strata vm` refusing Git-owned VMs | **Implemented** (M3 slice 2, experimental; ADR-0024); not yet driven by Git |
+| `strata.workloads.vms` and the IR `ir.strata.dev/v1alpha1` (`config.strata.ir`, `strata-controller validate-ir`) | **Implemented** (M3 slice 1, experimental; ADR-0023) |
+| Planner and reconciler (`internal/planner`, `internal/reconciler`; tested against a mock provider), VM owner and protection, drift reporting, `strata vm` refusing Git-owned VMs | **Implemented** (M3 slice 2, experimental; ADR-0024) |
 | `strata.gitops`: the controller follows a signed Git repository, evaluates it without network and plans (`strata config status/sync/plan`) | **Implemented** (M3 slice 3a, experimental; ADR-0025) |
 | Applying approved plans from Git (`strata config apply`, `--allow-delete`), deployment records and history (optional pruning), `autoApply = "safe"`, pin/unpin, adoption | **Implemented** (M3 slice 3b, experimental; ADR-0026) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
@@ -330,7 +332,33 @@ Slices:
      deployment records (kept, with optional pruning), automatic
      application of safe plans, pin/unpin, adoption, history (ADR-0026).
      **Done.**
-4. Validation on physical hardware.
+4. Validation on physical hardware, and the fixes it found. **Done.**
+
+### M3 status
+
+**M3 is complete.** Everything passes in VMs (`nixos-gitops` with a Git
+server node, and the other NixOS VM tests), and the M3 section of the
+[hardware validation](docs/installation/hardware-validation.md#m3-configuration-from-git)
+passed on one physical machine (GMKtec M6 Ultra, AMD) with a private
+GitHub repository: signed commits evaluated offline in about 1.6 s and
+470 MB, VMs created, changed, restored after drift, rolled back by
+pinning, adopted, kept while protected and deleted only with
+`--allow-delete` (data volume kept), with unsigned and rewound commits
+refused, and state and history kept across a reboot.
+
+Known limitations at the end of M3:
+
+- Only VMs are declared; host objects (pools, networks) and Strata itself
+  are applied with `nixos-rebuild`, after pulling the repository into
+  `/etc/nixos` (not signature-checked).
+- The power state is not declared; the reconciler starts VMs it creates.
+- Changes to a running VM, and restores, restart it.
+- Approvals go stale when anything on the node changes after the plan.
+- Kept data volumes block a new VM of the same name until M4 manages them.
+- Deployment records are files on the node until PostgreSQL (M5);
+  approvals are by local uid until accounts (M5); no webhooks (M5).
+- Automatic application (`autoApply = "safe"`) is tested in VMs only.
+- One controller per host; clusters are designed in M6.
 
 
 ## Architecture decision records

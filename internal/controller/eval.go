@@ -34,9 +34,32 @@ type EvalError struct {
 
 func (e *EvalError) Error() string {
 	if e.InputsMissing {
-		return ErrInputsMissing.Error() + " (has flake.lock changed? apply the host configuration with nixos-rebuild first):\n" + e.Detail
+		return ErrInputsMissing.Error() + " (has flake.lock changed? apply the host configuration with nixos-rebuild first):\n" + e.Cause()
 	}
-	return "evaluation failed:\n" + e.Detail
+	return "evaluation failed:\n" + e.Cause()
+}
+
+// Cause is the innermost error in Detail: Nix prints it last, from its
+// final "error:" line (with what follows, such as the failed assertions),
+// after the trace of where it happened. The full Detail is logged.
+func (e *EvalError) Cause() string {
+	lines := strings.Split(e.Detail, "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		trimmed := strings.TrimLeft(lines[i], " ")
+		if !strings.HasPrefix(trimmed, "error:") {
+			continue
+		}
+		indent := len(lines[i]) - len(trimmed)
+		out := make([]string, 0, len(lines)-i)
+		for _, l := range lines[i:] {
+			if len(l)-len(strings.TrimLeft(l, " ")) >= indent {
+				l = l[indent:]
+			}
+			out = append(out, l)
+		}
+		return strings.TrimSpace(strings.Join(out, "\n"))
+	}
+	return e.Detail
 }
 
 // Unwrap makes errors.Is(err, ErrInputsMissing) work.

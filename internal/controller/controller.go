@@ -22,6 +22,7 @@ type Repository interface {
 	Fetch(ctx context.Context) (string, error)
 	Verify(ctx context.Context, sha, lastApplied string) (string, error)
 	FileID(ctx context.Context, sha, path string) (string, error)
+	Tree(ctx context.Context, sha string) (string, error)
 	FlakeURL(sha string) string
 	Resolve(ctx context.Context, ref string) (string, error)
 }
@@ -139,6 +140,10 @@ type Controller struct {
 	// Exec applies plans (the agent, as the controller).
 	Exec  reconciler.Provider
 	Store *Store
+	// SystemEval evaluates the host's system and Observer reports the
+	// running and booted systems (host evaluation, host.go).
+	SystemEval SystemEvaluator
+	Observer   SystemObserver
 	// Version is the controller's Strata version, recorded in deployments.
 	Version string
 	Log     *slog.Logger
@@ -162,6 +167,13 @@ type Controller struct {
 	awaiting    *Deployment
 	running     *Deployment
 	deployments sync.WaitGroup
+
+	// Host evaluation has its own lock and state, apart from the workload
+	// pipeline (host.go). hostMu is never held while taking syncMu.
+	hostMu      sync.Mutex
+	hostLatest  *HostEvaluation
+	hostResults []*HostEvaluation // successful evaluations, oldest first
+	hostEvals   sync.WaitGroup
 }
 
 func (c *Controller) now() time.Time {
@@ -594,7 +606,10 @@ func (c *Controller) deploy(ctx context.Context, d *Deployment) {
 }
 
 // Wait waits for deployments in progress (tests, shutdown).
-func (c *Controller) Wait() { c.deployments.Wait() }
+func (c *Controller) Wait() {
+	c.deployments.Wait()
+	c.hostEvals.Wait()
+}
 
 var refPattern = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
 

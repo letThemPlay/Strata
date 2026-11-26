@@ -169,6 +169,7 @@ today:
 | `internal/gitops` | The configuration repository: fetch with `git`, signature and fast-forward checks (ADR-0025) |
 | `internal/agent/client` | Client of the agent's local API (`strata vm`, the controller), and the reconciler's provider over it (ADR-0026) |
 | `internal/configcli` | `strata config` |
+| `internal/hostcli` | `strata host`: host configuration status and evaluation (ADR-0028) |
 | `internal/controller`, `cmd/strata-controller` | The controller: synchronization, evaluation service, plans, deployments and their records, pin/unpin, adoption, its local API; `validate-ir` (ADR-0025, ADR-0026) |
 | `docs/` | Architecture (designs too detailed for this document), development, administration and installation documentation |
 | `.github/workflows/` | CI |
@@ -207,7 +208,8 @@ Planned (not yet created):
 | `strata.gitops`: the controller follows a signed Git repository, evaluates it without network and plans (`strata config status/sync/plan`) | **Implemented** (M3 slice 3a, experimental; ADR-0025) |
 | Applying approved plans from Git (`strata config apply`, `--allow-delete`), deployment records and history (optional pruning), `autoApply = "safe"`, pin/unpin, adoption | **Implemented** (M3 slice 3b, experimental; ADR-0026) |
 | Host lifecycle architecture (operations, trust boundaries, eligibility, approvals, activation and boot recovery, crash recovery) | **Accepted design**, not implemented ([design](docs/architecture/host-lifecycle.md); ADR-0027; ADR-0028 to ADR-0031 proposed) |
-| Host evaluation and build, read-only (`strata host status/build/history`, build records, drift against the running system) | Planned (M3 slice 5; ADR-0028) |
+| Host evaluation, read-only: the target commit's NixOS system evaluated in the evaluation service (`kind: system`), configuration drift and boot state, `GET /api/v1/nodes`, `/api/v1/nodes/{node}/configuration[/evaluate]`, `strata host status/evaluate` | **Implemented** (M3 slice 5a, experimental; ADR-0028) |
+| Host builds, read-only (build records, GC roots, `strata host build/history/show`) | Planned (M3 slice 5b; ADR-0028) |
 | Host deployment: manifest and revision, input fetching, host planner, privileged executor and approvals, activation with revert, persistence, reboot and boot recovery, health verification, generation rollback | Planned (M4, before storage and containers; ADR-0029 to ADR-0031) |
 | System and OCI containers, volume management | Planned (M4), through Incus ([ADR-0015](#adr-0015-incus-is-the-workload-backend)) |
 | REST API, auth, dashboard | Planned (M5) |
@@ -388,7 +390,11 @@ Slices:
    nix-daemon with GC roots, build records, drift between the evaluated
    head and the running system, `strata host status/build/history`
    (ADR-0028). No activation, no root, no input fetching: a commit that
-   changes `flake.lock` is still reported as a host change. **Planned.**
+   changes `flake.lock` is still reported as a host change.
+   - 5a: system evaluation, status, configuration drift and boot state,
+     `strata host status/evaluate`. **Done.**
+   - 5b: builds, build records, GC roots, history. **Planned** (its design
+     addendum is reviewed first).
 
 ### M3 status
 
@@ -1519,6 +1525,33 @@ outcomes"). Host deployment comes first: storage declared through NixOS
   when the build is older than the retention the slice defines.
   `strata-controller` must not be in nix `trusted-users`; the gitops
   module asserts it.
+- **Implementation note (5a, evaluation):**
+  - The evaluation service takes a `kind` (`ir`, the default and the
+    existing protocol, or `system`); any other kind is refused.
+  - System evaluation runs `nix derivation show` on the toplevel attribute,
+    not `nix eval`: `nix eval` writes no derivations, so a system's
+    `drvPath` can't be computed unless its input derivations are already in
+    the store. `derivation show` instantiates the system (writing `.drv`
+    files through nix-daemon, named explicitly with `NIX_REMOTE=daemon`;
+    the evaluation cache is off) and reports the derivation and its output
+    from one evaluation. Same restrictions as the IR.
+  - The evaluation is bound to its commit (the flake URL names it) and
+    fails if the controller's target moves meanwhile; successes only are
+    cached, in memory. Host evaluation has its own lock, state and errors
+    and never touches the workload pipeline.
+  - Configuration drift (desired vs `/run/current-system`) and boot state
+    (`/run/current-system` vs `/run/booted-system`) are independent
+    properties.
+  - Measured: about 9.6 s and 614 MB peak in the `nixos-gitops` VM
+    (against about 3.3 s and 460 MB for the IR), and 2.9 s and 654 MB on
+    hv-02, where the result equals the running system; the 4 GiB cap
+    stays ([hardware](docs/installation/hardware-validation.md#m3-slice-5a-host-evaluation-on-hv-02-2026-11-26)).
+  - VM test caveat: the test VM's store is an overlay on the build
+    machine's store and holds `.drv` files that exist on disk but aren't
+    valid in the VM's database; instantiating through nix-daemon as an
+    untrusted user fails on them. The test registers each commit's
+    derivations as root first. On hardware (hv-02) the evaluation
+    service's exact setup instantiated the system without that.
 
 ### ADR-0029: Host manifest, revision and input fetching
 

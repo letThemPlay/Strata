@@ -47,6 +47,7 @@ nix flake init -t github:letThemPlay/Strata#host
 - [docs/installation/hardware-validation.md](docs/installation/hardware-validation.md) — physical hardware validation (M1 acceptance)
 - [docs/administration/workloads.md](docs/administration/workloads.md) — declared workloads and the IR (M3, experimental)
 - [docs/administration/gitops.md](docs/administration/gitops.md) — the controller: configuration from Git (M3, experimental)
+- [docs/administration/host-deployment.md](docs/administration/host-deployment.md) — host configuration: evaluation, drift and boot state (M3, experimental; no deployment yet)
 - [docs/architecture/host-lifecycle.md](docs/architecture/host-lifecycle.md) — host lifecycle management (accepted design, not implemented)
 - [examples/standalone](examples/standalone/host.nix) — example host with declared workloads
 - [CLAUDE.md](CLAUDE.md) — full project specification and roadmap

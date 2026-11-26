@@ -33,11 +33,13 @@ let
     }
   '';
   lock = pkgs.writeText "flake.lock" (builtins.toJSON hostLock);
-  # host.nix with the given workloads (a Nix expression).
-  hostNix =
-    name: workloads:
+  # host.nix with the given workloads (a Nix expression) and extra host
+  # settings.
+  hostNixWith =
+    name: workloads: extra:
     pkgs.writeText name ''
       {
+        ${extra}
         nixpkgs.hostPlatform = "${system}";
         boot.loader.grub.enable = false;
         fileSystems."/" = { device = "/dev/null"; fsType = "ext4"; };
@@ -61,6 +63,7 @@ let
         };
       }
     '';
+  hostNix = name: workloads: hostNixWith name workloads "";
   vm = name: ''
     ${name} = {
       resources = { cpu = 1; memory = "256MiB"; };
@@ -103,6 +106,14 @@ let
   hostV9 = hostNix "host-v9.nix" "{ ${web01 2 "${protected} autostart = true;"} ${cliVM 2} ${vm "web-03"} }";
   hostBadPool = hostNix "host-bad.nix" ''{ web-01 = { resources = { cpu = 1; memory = "256MiB"; }; disks.root = { size = "1GiB"; pool = "nopool"; }; }; }'';
   hostThrows = pkgs.writeText "host-throws.nix" ''throw "this commit was evaluated"'';
+  # Host evaluation (M3 slice 5): v8's workloads, with a host setting whose
+  # value only the system needs (the IR still evaluates), or a changed one.
+  v8Workloads = "{ ${web01 2 "${protected} autostart = true;"} ${cliVM 2} }";
+  hostSystemThrows =
+    hostNixWith "host-system-throws.nix" v8Workloads
+      ''environment.etc."strata-test".text = throw "only the host system needs this";'';
+  hostEtcA = hostNixWith "host-etc-a.nix" v8Workloads ''environment.etc."strata-test".text = "a";'';
+  hostEtcB = hostNixWith "host-etc-b.nix" v8Workloads ''environment.etc."strata-test".text = "b";'';
 
   # The key without its comment, named alice.
   signerPublic =
@@ -501,6 +512,96 @@ pkgs.testers.runNixOSTest {
         st = status()
         assert st["lastApplied"] == last and st.get("pinned") is None, st
         assert json.loads(hv01.succeed(config("history --json"))), "history lost"
+
+    def host(cmd):
+        return f"su strata-admin -c 'strata host {cmd}'"
+
+    def host_status():
+        return json.loads(hv01.succeed(host("status --json")))
+
+    def host_snapshot():
+        """What a host evaluation must leave as it was (each part's status and output)."""
+        parts = [
+            "readlink /run/current-system", "readlink /run/booted-system",
+            "ls -la /nix/var/nix/profiles/", "ls -laR /boot",
+            "ls /var/lib/strata-controller/deployments | sort", "cat /var/lib/strata-controller/state.json",
+        ]
+        return [hv01.execute(p) for p in parts] + [hv01.succeed(config("history --json"))]
+
+    def independent_eval(commit, attr):
+        """The same commit's system, instantiated directly with nix (not by Strata): attr is drvPath or outPath."""
+        query = '.derivations | keys[0] | "/nix/store/" + .' if attr == "drvPath" else '.derivations[].outputs.out.path | "/nix/store/" + .'
+        return hv01.succeed(
+            "runuser -u strata-controller -- env HOME=/tmp nix --extra-experimental-features 'nix-command flakes'"
+            f" derivation show --offline 'git+file:///var/lib/strata-controller/repo.git?rev={commit}#nixosConfigurations.hv01.config.system.build.toplevel'"
+            f" | jq -r '{query}'"
+        ).strip()
+
+    def register_drvs(commit):
+        """Register a commit's derivations as root, before Strata evaluates it.
+
+        The VM's /nix/store is an overlay on the build machine's store: it
+        holds .drv files that exist on disk but aren't valid in the VM's Nix
+        database, which a real host's store doesn't. Instantiating through
+        nix-daemon as an untrusted user (as the evaluation service does)
+        fails on them in the VM; on hardware (hv-02) it works without this.
+        Root writes the store directly and makes them valid.
+        """
+        hv01.execute(
+            "nix --extra-experimental-features 'nix-command flakes' derivation show --offline"
+            f" 'git+file:///var/lib/strata-controller/repo.git?rev={commit}#nixosConfigurations.hv01.config.system.build.toplevel' >/dev/null 2>&1"
+        )
+
+    with subtest("host evaluation evaluates the target's system and changes nothing on the host"):
+        hv01.succeed(config("sync"))
+        hc = host_status()
+        assert hc["configurationDrift"] == "unknown" and hc["bootState"] == "current" and "evaluation" not in hc, hc
+        assert hc["observed"]["current"] == hv01.succeed("readlink /run/current-system").strip(), hc
+        register_drvs(hc["target"])
+        before = host_snapshot()
+        out = hv01.succeed(host("evaluate"))
+        hc = host_status()
+        ev = hc["evaluation"]
+        target = hc["target"]
+        assert ev["state"] == "succeeded" and ev["source"]["commit"] == target and hc["desired"]["id"] == ev["id"], hc
+        assert ev["outPath"] == independent_eval(target, "outPath") and ev["drvPath"] == independent_eval(target, "drvPath"), ev
+        hv01.succeed(f"test -e {ev['drvPath']}")
+        assert ev["source"]["tree"] and ev["source"]["flakeLock"] and ev["source"]["signer"] == "alice", ev
+        # The test VM runs the test's own system, not the repository's.
+        assert hc["configurationDrift"] == "differs" and hc["bootState"] == "current", hc
+        assert "Configuration drift: differs" in out and "Boot state:          current" in out, out
+        # The same commit evaluates to the same system.
+        hv01.succeed(host("evaluate"))
+        again = host_status()["evaluation"]
+        assert again["id"] != ev["id"] and again["outPath"] == ev["outPath"], again
+        assert host_snapshot() == before, "host evaluation changed the host"
+        print(f"host evaluation took {ev['durationSeconds']} s")
+        print(hv01.succeed("journalctl -u 'strata-controller-eval@*' -o cat | grep 'memory peak' | tail -2"))
+
+    with subtest("a failed host evaluation leaves workload planning alone; a changed commit is a different system"):
+        commit({"host.nix": "${hostSystemThrows}"}, message="system-throws")
+        hv01.succeed(config("sync"))
+        workloads = status()
+        assert not workloads.get("error") and workloads["plan"], workloads
+        hv01.fail(host("evaluate"))
+        hc = host_status()
+        assert hc["evaluation"]["state"] == "failed" and "only the host system needs this" in hc["evaluation"]["error"], hc
+        assert hc["configurationDrift"] == "unknown" and "failed" in hc["driftReason"] and "desired" not in hc, hc
+        assert status()["plan"]["id"] == workloads["plan"]["id"] and not status().get("error"), "the workload plan changed"
+        a = commit({"host.nix": "${hostEtcA}"}, message="etc-a")
+        hv01.succeed(config("sync"))
+        register_drvs(a)
+        hv01.succeed(host("evaluate"))
+        out_a = host_status()["evaluation"]["outPath"]
+        b = commit({"host.nix": "${hostEtcB}"}, message="etc-b")
+        hv01.succeed(config("sync"))
+        register_drvs(b)
+        hv01.succeed(host("evaluate"))
+        hc = host_status()
+        assert hc["target"] == b and hc["evaluation"]["outPath"] != out_a, (out_a, hc)
+        assert hc["evaluation"]["outPath"] == independent_eval(b, "outPath") and out_a == independent_eval(a, "outPath")
+        # An unknown node is not this controller's.
+        hv01.fail("su strata-admin -c 'strata host status --node hv02'")
 
     with subtest("requests are audited; nothing failed"):
         uid = hv01.succeed("id -u strata-admin").strip()

@@ -479,3 +479,28 @@ Follow-ups (not blocking M3):
   it must do so before the plan is made (documented in step 11).
 - The pull into `/etc/nixos` for host changes does not verify signatures;
   only the controller does (documented).
+
+### M3 slice 5a: host evaluation on hv-02, 2026-11-26
+
+The host evaluation command the evaluation service runs (`nix derivation
+show` of `nixosConfigurations.hv-02.config.system.build.toplevel`, offline,
+pure, no import-from-derivation, no substitution, evaluation cache off,
+through nix-daemon) was run by hand on hv-02 with the service's identity
+and sandbox (`strata-controller`, untrusted; `ProtectSystem=strict`,
+`PrivateNetwork`, `AF_UNIX` only, `MemoryMax=4G`), for the commit the
+controller targets. hv-02 still ran the build from the M3 run, so this
+checks the evaluation step, not `strata host evaluate` itself.
+
+| Run | Runtime | Memory peak | Output path vs `/run/current-system` |
+|---|---|---|---|
+| 1 | 2.93 s | 653.8 MB | equal (`2q6cgqlr…-nixos-system-hv-02-26.11.20261121.2786a2a`) |
+| 2 | 2.91 s | 654.1 MB | equal |
+
+- Instantiating as an untrusted user through nix-daemon works on the
+  host's store; the VM test needs derivations registered as root first
+  (ADR-0028, implementation note).
+- The output path equals the running system: the host runs exactly its
+  repository configuration, so configuration drift is `in-sync`.
+- Both runs came after an earlier probe had written the derivations; a
+  first evaluation of a new commit writes more and may take longer. The
+  4 GiB cap leaves ample room.

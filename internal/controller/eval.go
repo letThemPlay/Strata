@@ -87,30 +87,36 @@ var (
 	offlineFailure = regexp.MustCompile(`(?i)(offline mode|unable to download|cannot (be )?fetch|does not exist in the Nix store|not available in the store|Could not resolve host|Couldn't connect)`)
 )
 
-// IR evaluates nixosConfigurations.<node>.config.strata.ir of flakeURL
-// and returns the JSON.
-func (e *Evaluator) IR(ctx context.Context, flakeURL, node string) ([]byte, error) {
-	if !nodePattern.MatchString(node) {
-		return nil, fmt.Errorf("node %q is not a valid node ID", node)
+// restricted is a nix command (its words, then the installable last)
+// kept offline, pure, without import-from-derivation and without
+// substitution (ADR-0025).
+func restricted(words ...string) []string {
+	n := len(words) - 1
+	return append(append(append([]string{}, words[:n]...),
+		"--offline", "--no-write-lock-file", "--quiet",
+		"--option", "allow-import-from-derivation", "false",
+		"--option", "pure-eval", "true",
+		"--option", "substitute", "false",
+	), words[n])
+}
+
+func (e *Evaluator) timeout() time.Duration {
+	if e.Timeout == 0 {
+		return 5 * time.Minute
 	}
-	timeout := e.Timeout
-	if timeout == 0 {
-		timeout = 5 * time.Minute
-	}
-	ctx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	return e.Timeout
+}
+
+// run runs nix with args (after the experimental features) and returns
+// its standard output, at most limit bytes. ctx carries the evaluation's
+// deadline, timeout is only reported. env is added to nix's environment.
+func (e *Evaluator) run(ctx context.Context, timeout time.Duration, limit int, env []string, args ...string) ([]byte, error) {
 	bin := e.Nix
 	if bin == "" {
 		bin = "nix"
 	}
-	attr := flakeURL + `#nixosConfigurations."` + node + `".config.strata.ir`
-	cmd := exec.CommandContext(ctx, bin, //nolint:gosec // Fixed arguments; the flake URL and node are validated.
-		"--extra-experimental-features", "nix-command flakes",
-		"eval", "--json", "--offline", "--no-write-lock-file", "--quiet",
-		"--option", "allow-import-from-derivation", "false",
-		"--option", "pure-eval", "true",
-		"--option", "substitute", "false",
-		attr)
+	cmd := exec.CommandContext(ctx, bin, //nolint:gosec // Fixed arguments; flake URLs, nodes and store paths are validated.
+		append([]string{"--extra-experimental-features", "nix-command flakes"}, args...)...)
 	// After the timeout, do not wait for children that keep the pipes open.
 	cmd.WaitDelay = 5 * time.Second
 	cmd.Env = []string{
@@ -119,21 +125,136 @@ func (e *Evaluator) IR(ctx context.Context, flakeURL, node string) ([]byte, erro
 		"XDG_CACHE_HOME=" + e.Home + "/.cache",
 		"LC_ALL=C",
 	}
+	cmd.Env = append(cmd.Env, env...)
 	var stdout, stderr limitedBuffer
-	stdout.limit, stderr.limit = maxIRBytes, 1<<20
+	stdout.limit, stderr.limit = limit, 1<<20
 	cmd.Stdout, cmd.Stderr = &stdout, &stderr
 	err := cmd.Run()
 	if ctx.Err() != nil {
 		return nil, fmt.Errorf("evaluation timed out after %s", timeout)
 	}
 	if stdout.over {
-		return nil, fmt.Errorf("evaluation output exceeds %d bytes", maxIRBytes)
+		return nil, fmt.Errorf("evaluation output exceeds %d bytes", limit)
 	}
 	if err != nil {
 		detail := nixError(stderr.String())
 		return nil, &EvalError{Detail: detail, InputsMissing: offlineFailure.MatchString(detail)}
 	}
 	return stdout.Bytes(), nil
+}
+
+// IR evaluates nixosConfigurations.<node>.config.strata.ir of flakeURL
+// and returns the JSON.
+func (e *Evaluator) IR(ctx context.Context, flakeURL, node string) ([]byte, error) {
+	if !nodePattern.MatchString(node) {
+		return nil, fmt.Errorf("node %q is not a valid node ID", node)
+	}
+	timeout := e.timeout()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	attr := flakeURL + `#nixosConfigurations."` + node + `".config.strata.ir`
+	return e.run(ctx, timeout, maxIRBytes, nil, restricted("eval", "--json", attr)...)
+}
+
+// SystemEval is a node's evaluated NixOS system: the derivation of
+// config.system.build.toplevel and the output path it builds. The output
+// need not exist: evaluating builds nothing.
+type SystemEval struct {
+	DrvPath string `json:"drvPath"`
+	OutPath string `json:"outPath"`
+}
+
+// storePath is a store path: the store, a Nix base-32 hash and a name.
+var storePath = regexp.MustCompile(`^/nix/store/[0-9abcdfghijklmnpqrsvwxyz]{32}-[0-9A-Za-z+._?=-]+$`)
+
+// Validate checks that both paths are store paths, of a derivation and of
+// an output.
+func (s SystemEval) Validate() error {
+	switch {
+	case !storePath.MatchString(s.DrvPath) || !strings.HasSuffix(s.DrvPath, ".drv"):
+		return fmt.Errorf("derivation %q is not a store derivation", s.DrvPath)
+	case !storePath.MatchString(s.OutPath) || strings.HasSuffix(s.OutPath, ".drv"):
+		return fmt.Errorf("output %q is not a store path", s.OutPath)
+	}
+	return nil
+}
+
+// System evaluates nixosConfigurations.<node>.config.system.build.toplevel
+// of flakeURL with the same restrictions as IR (offline, pure, no
+// import-from-derivation, no substitution) and returns its derivation and
+// output path.
+//
+// It uses `nix derivation show` on the attribute, not `nix eval`: nix eval
+// runs read-only and writes no derivations, so a NixOS system's drvPath
+// can't be computed unless every input derivation is already in the
+// store. `derivation show` instantiates the system (writing its .drv files
+// to the store; it builds nothing) and reports the derivation and its
+// output from one evaluation.
+func (e *Evaluator) System(ctx context.Context, flakeURL, node string) (SystemEval, error) {
+	if !nodePattern.MatchString(node) {
+		return SystemEval{}, fmt.Errorf("node %q is not a valid node ID", node)
+	}
+	timeout := e.timeout()
+	ctx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	attr := flakeURL + `#nixosConfigurations."` + node + `".config.system.build.toplevel`
+	// Instantiating writes derivations, through nix-daemon: named
+	// explicitly rather than left to nix's automatic store choice in the
+	// service's read-only view of /nix. The evaluation cache is off, so
+	// every system evaluation computes its paths from the commit itself.
+	show, err := e.run(ctx, timeout, maxIRBytes, []string{"NIX_REMOTE=daemon"},
+		restricted("derivation", "show", "--option", "eval-cache", "false", attr)...)
+	if err != nil {
+		return SystemEval{}, err
+	}
+	sys, err := parseDerivationShow(show)
+	if err != nil {
+		return SystemEval{}, fmt.Errorf("system evaluation: %w", err)
+	}
+	return sys, nil
+}
+
+// drvJSON is the part of `nix derivation show` that matters here.
+type drvJSON struct {
+	Outputs map[string]struct {
+		Path string `json:"path"`
+	} `json:"outputs"`
+}
+
+// parseDerivationShow reads `nix derivation show` output for one
+// derivation: the format of Nix 2.35 (version 4: derivations keyed by base
+// name, base-name output paths) and the earlier one (keyed by full path,
+// full output paths). It returns the derivation and its output "out".
+func parseDerivationShow(show []byte) (SystemEval, error) {
+	var v4 struct {
+		Derivations map[string]drvJSON `json:"derivations"`
+	}
+	if err := json.Unmarshal(show, &v4); err != nil {
+		return SystemEval{}, fmt.Errorf("unexpected output of nix derivation show: %w", err)
+	}
+	drvs := v4.Derivations
+	if drvs == nil {
+		if err := json.Unmarshal(show, &drvs); err != nil {
+			return SystemEval{}, fmt.Errorf("unexpected output of nix derivation show: %w", err)
+		}
+	}
+	if len(drvs) != 1 {
+		return SystemEval{}, fmt.Errorf("nix derivation show listed %d derivations, want 1", len(drvs))
+	}
+	full := func(p string) string {
+		if p != "" && !strings.HasPrefix(p, "/") {
+			return "/nix/store/" + p
+		}
+		return p
+	}
+	var sys SystemEval
+	for name, d := range drvs {
+		sys = SystemEval{DrvPath: full(name), OutPath: full(d.Outputs["out"].Path)}
+	}
+	if err := sys.Validate(); err != nil {
+		return SystemEval{}, err
+	}
+	return sys, nil
 }
 
 // nixError returns the useful part of Nix's error output: from its first
@@ -175,10 +296,19 @@ func (b *limitedBuffer) Write(p []byte) (int, error) {
 type evalRequest struct {
 	Commit string `json:"commit"`
 	Node   string `json:"node"`
+	// Kind is "ir" (also when empty) or "system".
+	Kind string `json:"kind,omitempty"`
 }
+
+// Evaluation kinds.
+const (
+	KindIR     = "ir"
+	KindSystem = "system"
+)
 
 type evalReply struct {
 	IR            json.RawMessage `json:"ir,omitempty"`
+	System        *SystemEval     `json:"system,omitempty"`
 	Error         string          `json:"error,omitempty"`
 	Detail        string          `json:"detail,omitempty"`
 	InputsMissing bool            `json:"inputsMissing,omitempty"`
@@ -193,19 +323,28 @@ func ServeEval(ctx context.Context, rw io.ReadWriter, e *Evaluator, repoDir stri
 		return fmt.Errorf("eval request: %w", err)
 	}
 	reply := evalReply{}
-	if !shaPattern.MatchString(req.Commit) {
-		reply.Error = fmt.Sprintf("commit %q: not a full commit ID", req.Commit)
-	} else {
-		data, err := e.IR(ctx, "git+file://"+repoDir+"?rev="+req.Commit, req.Node)
-		var ee *EvalError
-		switch {
-		case errors.As(err, &ee):
-			reply.Detail, reply.InputsMissing = ee.Detail, ee.InputsMissing
-		case err != nil:
-			reply.Error = err.Error()
-		default:
-			reply.IR = data
+	url := "git+file://" + repoDir + "?rev=" + req.Commit
+	var err error
+	switch {
+	case !shaPattern.MatchString(req.Commit):
+		err = fmt.Errorf("commit %q: not a full commit ID", req.Commit)
+	case req.Kind == "" || req.Kind == KindIR:
+		reply.IR, err = e.IR(ctx, url, req.Node)
+	case req.Kind == KindSystem:
+		var sys SystemEval
+		if sys, err = e.System(ctx, url, req.Node); err == nil {
+			reply.System = &sys
 		}
+	default:
+		// Never fall back to another kind.
+		err = fmt.Errorf("unknown evaluation kind %q", req.Kind)
+	}
+	var ee *EvalError
+	switch {
+	case errors.As(err, &ee):
+		reply.Detail, reply.InputsMissing = ee.Detail, ee.InputsMissing
+	case err != nil:
+		reply.Error = err.Error()
 	}
 	if err := json.NewEncoder(rw).Encode(reply); err != nil {
 		return fmt.Errorf("eval reply: %w", err)
@@ -225,33 +364,59 @@ type RemoteEvaluator struct {
 // IR implements IREvaluator. flakeURL must be the repository's URL of a
 // commit (gitops.Repo.FlakeURL); only the commit is sent.
 func (r *RemoteEvaluator) IR(ctx context.Context, flakeURL, node string) ([]byte, error) {
+	reply, err := r.call(ctx, flakeURL, node, "")
+	if err != nil {
+		return nil, err
+	}
+	return reply.IR, nil
+}
+
+// System implements SystemEvaluator: the evaluation service evaluates the
+// node's system; the reply is checked again here.
+func (r *RemoteEvaluator) System(ctx context.Context, flakeURL, node string) (SystemEval, error) {
+	reply, err := r.call(ctx, flakeURL, node, KindSystem)
+	if err != nil {
+		return SystemEval{}, err
+	}
+	if reply.System == nil {
+		return SystemEval{}, errors.New("evaluation service: the reply has no system")
+	}
+	if err := reply.System.Validate(); err != nil {
+		return SystemEval{}, fmt.Errorf("evaluation service: %w", err)
+	}
+	return *reply.System, nil
+}
+
+// call sends one request for the commit of flakeURL (only the commit is
+// sent) and returns the reply.
+func (r *RemoteEvaluator) call(ctx context.Context, flakeURL, node, kind string) (evalReply, error) {
 	_, commit, ok := strings.Cut(flakeURL, "?rev=")
 	if !ok || !shaPattern.MatchString(commit) {
-		return nil, fmt.Errorf("flake URL %q has no commit", flakeURL)
+		return evalReply{}, fmt.Errorf("flake URL %q has no commit", flakeURL)
 	}
 	ctx, cancel := context.WithTimeout(ctx, r.Timeout+30*time.Second)
 	defer cancel()
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "unix", r.Socket)
 	if err != nil {
-		return nil, fmt.Errorf("evaluation service: %w", err)
+		return evalReply{}, fmt.Errorf("evaluation service: %w", err)
 	}
 	defer func() { _ = conn.Close() }()
 	if deadline, ok := ctx.Deadline(); ok {
 		_ = conn.SetDeadline(deadline)
 	}
-	if err := json.NewEncoder(conn).Encode(evalRequest{Commit: commit, Node: node}); err != nil {
-		return nil, fmt.Errorf("evaluation service: %w", err)
+	if err := json.NewEncoder(conn).Encode(evalRequest{Commit: commit, Node: node, Kind: kind}); err != nil {
+		return evalReply{}, fmt.Errorf("evaluation service: %w", err)
 	}
 	var reply evalReply
 	if err := json.NewDecoder(io.LimitReader(bufio.NewReader(conn), maxIRBytes+1<<20)).Decode(&reply); err != nil {
-		return nil, fmt.Errorf("evaluation service: no reply: %w", err)
+		return evalReply{}, fmt.Errorf("evaluation service: no reply: %w", err)
 	}
 	switch {
 	case reply.Error != "":
-		return nil, errors.New(reply.Error)
+		return evalReply{}, errors.New(reply.Error)
 	case reply.Detail != "":
-		return nil, &EvalError{Detail: reply.Detail, InputsMissing: reply.InputsMissing}
+		return evalReply{}, &EvalError{Detail: reply.Detail, InputsMissing: reply.InputsMissing}
 	}
-	return reply.IR, nil
+	return reply, nil
 }

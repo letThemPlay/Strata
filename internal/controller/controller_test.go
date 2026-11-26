@@ -48,6 +48,9 @@ func (r *fakeRepo) FileID(_ context.Context, sha, _ string) (string, error) { re
 
 func (r *fakeRepo) FlakeURL(sha string) string { return "git+file:///repo?rev=" + sha }
 
+// Tree is the commit ID with its first character replaced (a stand-in).
+func (r *fakeRepo) Tree(_ context.Context, sha string) (string, error) { return "f" + sha[1:], nil }
+
 func (r *fakeRepo) Resolve(_ context.Context, ref string) (string, error) {
 	for _, c := range []string{c1, c2, c3} {
 		if strings.HasPrefix(c, ref) {

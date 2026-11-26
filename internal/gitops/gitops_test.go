@@ -137,6 +137,21 @@ func TestFetchAndVerify(t *testing.T) {
 	if lock1 == "" || lock1 != lock2 || missing != "" || err != nil {
 		t.Errorf("FileID %q %q %q %v", lock1, lock2, missing, err)
 	}
+	// Tree: what the commit contains; it differs between commits with
+	// different content and is what `git rev-parse` reports.
+	tree1, err := f.repo.Tree(ctx, first)
+	if err != nil || tree1 != run(t, f.work, "git", "rev-parse", first+"^{tree}") {
+		t.Errorf("Tree %q %v", tree1, err)
+	}
+	if tree2, _ := f.repo.Tree(ctx, second); tree2 == tree1 {
+		t.Error("two commits with different content have the same tree")
+	}
+	if _, err := f.repo.Tree(ctx, "HEAD"); err == nil {
+		t.Error("Tree accepted a ref name")
+	}
+	if _, err := f.repo.Tree(ctx, strings.Repeat("0", 40)); err == nil {
+		t.Error("Tree of a missing commit")
+	}
 	third := f.commit(t, "flake.lock", "lock 2", f.trusted)
 	f.push(t, false)
 	if _, err := f.repo.Fetch(ctx); err != nil {

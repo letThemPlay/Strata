@@ -264,6 +264,7 @@ func (c *Controller) sync(ctx context.Context) error {
 		target, lastApplied = st.Pinned, ""
 	}
 	if cache == nil || cache.commit != target {
+		started := c.now()
 		e, err := c.evaluate(ctx, target, lastApplied, lastGood)
 		c.mu.Lock()
 		if err != nil {
@@ -276,7 +277,8 @@ func (c *Controller) sync(ctx context.Context) error {
 		c.cache, c.lastGood = e, e
 		c.mu.Unlock()
 		cache = e
-		c.log().InfoContext(ctx, "evaluated", "commit", target, "signer", e.signer, "resources", len(e.doc.Resources), "pinned", e.pinned)
+		c.log().InfoContext(ctx, "evaluated", "commit", target, "signer", e.signer, "resources", len(e.doc.Resources), "pinned", e.pinned,
+			"seconds", c.now().Sub(started).Round(time.Millisecond).Seconds())
 	}
 
 	obs, err := observe(ctx, c.Node)
@@ -310,6 +312,9 @@ func (c *Controller) propose(ctx context.Context) *Deployment {
 		c.awaiting = nil
 	}
 	if !actionable {
+		if cur != nil && c.running == nil && cur.Commit != c.state.LastApplied {
+			c.converged(ctx, cur, now)
+		}
 		return nil
 	}
 	if c.awaiting == nil {
@@ -339,6 +344,45 @@ func (c *Controller) propose(ctx context.Context) *Deployment {
 	return nil
 }
 
+// converged records a new commit whose plan has nothing to do as applied:
+// the node already matches it, so there is nothing to approve. The commit
+// was verified (signed, descending from the last applied one) when it was
+// evaluated; recording it keeps the forward-only check at the commit the
+// node matches. c.mu is held.
+func (c *Controller) converged(ctx context.Context, cur *CurrentPlan, now time.Time) {
+	id, err := NewID(now)
+	if err != nil {
+		c.log().ErrorContext(ctx, "record plan", "error", err)
+		return
+	}
+	st := c.state
+	st.LastApplied = cur.Commit
+	if err := c.saveState(st); err != nil {
+		c.log().ErrorContext(ctx, "save state", "error", err)
+		return
+	}
+	c.state = st
+	plan := cur.Plan
+	d := &Deployment{
+		ID: id, Kind: KindPlan, Repository: c.Config.Repository, Branch: c.Config.Branch, Node: c.Config.Node,
+		Commit: cur.Commit, Signer: cur.Signer, FlakeLock: c.cache.flakeLock, Pinned: c.cache.pinned,
+		StrataVersion: c.Version, IRGenerator: c.cache.doc.Generator.StrataVersion,
+		PlanID: plan.ID, Plan: &plan, ApprovedBy: "auto", CreatedAt: now,
+	}
+	d.transition(StateSucceeded, "the node already matches this commit: nothing to apply", now)
+	c.records = append(c.records, d)
+	c.save(ctx, d)
+	cur.Deployment = d.ID
+	if c.Store != nil {
+		if pruned, err := c.Store.Prune(c.records, c.Config.KeepDeployments); err != nil {
+			c.log().ErrorContext(ctx, "prune deployments", "error", err)
+		} else {
+			c.records = pruned
+		}
+	}
+	c.log().InfoContext(ctx, "commit applied: nothing to do", "deployment", d.ID, "commit", d.Commit)
+}
+
 // save writes a record; c.mu is held.
 func (c *Controller) save(ctx context.Context, d *Deployment) {
 	if c.Store == nil {
@@ -361,12 +405,14 @@ func (c *Controller) evaluate(ctx context.Context, sha, lastApplied string, last
 	}
 	data, err := c.Eval.IR(ctx, c.Repo.FlakeURL(sha), c.Config.Node)
 	if err != nil {
+		detail := err.Error()
+		var ee *EvalError
+		if errors.As(err, &ee) {
+			detail = ee.Cause()
+			// Messages show the cause; the journal keeps Nix's trace.
+			c.log().WarnContext(ctx, "evaluation failed", "commit", sha, "nix", ee.Detail)
+		}
 		if lastGood != nil && lastGood.flakeLock != lock {
-			detail := err.Error()
-			var ee *EvalError
-			if errors.As(err, &ee) {
-				detail = ee.Detail
-			}
 			return nil, fmt.Errorf("commit %s changes flake.lock: the host configuration changed; apply it with nixos-rebuild first. Nix reported:\n%s", short(sha), detail)
 		}
 		return nil, fmt.Errorf("commit %s: %w", short(sha), err)

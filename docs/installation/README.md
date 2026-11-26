@@ -139,7 +139,8 @@ ssh strata-admin@<management address>
 ```
 
 Push the host configuration to your own repository; it is the source of
-truth for this host (and what Strata will synchronize from in M3):
+truth for this host, and what the controller follows
+([configuration from Git](../administration/gitops.md)):
 
 ```sh
 cd /etc/nixos

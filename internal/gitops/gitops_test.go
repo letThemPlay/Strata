@@ -170,6 +170,53 @@ func TestVerifyRefusesUntrustedCommits(t *testing.T) {
 	}
 }
 
+// A commit with an OpenPGP signature (for example one made on a Git
+// host's website) is refused with the reason, and gpg is never run.
+func TestVerifyRefusesOtherSignatureKinds(t *testing.T) {
+	f := newFixture(t)
+	ctx := context.Background()
+	base := f.commit(t, "a", "1", f.trusted)
+	tree := run(t, f.work, "git", "rev-parse", "HEAD^{tree}")
+	forge := func(sig string) string {
+		obj := "tree " + tree + "\nparent " + base + "\n" +
+			"author A <a@example.org> 1700000000 +0000\ncommitter A <a@example.org> 1700000000 +0000\n" +
+			"gpgsig " + sig + "\n \n -----END-----\n\nforged\n"
+		cmd := exec.Command("git", "hash-object", "-t", "commit", "-w", "--stdin")
+		cmd.Dir, cmd.Stdin = f.work, strings.NewReader(obj)
+		out, err := cmd.Output()
+		if err != nil {
+			t.Fatal(err)
+		}
+		sha := strings.TrimSpace(string(out))
+		run(t, f.work, "git", "update-ref", "refs/heads/main", sha)
+		f.push(t, true)
+		if _, err := f.repo.Fetch(ctx); err != nil {
+			t.Fatal(err)
+		}
+		return sha
+	}
+	// The reason comes from the signature header; git verify-commit (and
+	// so gpg) is not run for these.
+	for sig, want := range map[string]string{
+		"-----BEGIN PGP SIGNATURE-----":  "OpenPGP signature",
+		"-----BEGIN SIGNED MESSAGE-----": "X.509 or unknown",
+	} {
+		sha := forge(sig)
+		_, err := f.repo.Verify(ctx, sha, "")
+		if !errors.Is(err, ErrUntrusted) || !strings.Contains(err.Error(), want) || strings.Contains(err.Error(), "gpg") {
+			t.Errorf("%s: %v", sig, err)
+		}
+	}
+	unsigned := f.commit(t, "b", "2", "")
+	f.push(t, true)
+	if _, err := f.repo.Fetch(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.repo.Verify(ctx, unsigned, ""); err == nil || !strings.Contains(err.Error(), "not signed)") {
+		t.Errorf("unsigned: %v", err)
+	}
+}
+
 func TestVerifyRefusesRewinds(t *testing.T) {
 	f := newFixture(t)
 	ctx := context.Background()
